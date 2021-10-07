@@ -11,10 +11,11 @@
 #include <stdint.h> // uint_8t
 #include <string.h>
 
-int const SIZE = 4096;
+int const SIZE = 10000;
 
-//Citations: 
-// warn usage - https://linux.die.net/man/3/warn
+//Citations / Resources:
+// stderr functions:
+//    https://www.qnx.com/developers/docs/6.5.0SP1.update/com.qnx.doc.neutrino_lib_ref/e/err.html
 
 // Returns 1 when chars of string are digits, else returns 0
 int isDigit(char* num) {
