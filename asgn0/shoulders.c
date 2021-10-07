@@ -38,16 +38,20 @@ void Buffer(int lines, int fd) {
 
   //loop through lines                   
   for (int j = 0; j < lines; j++) {
-    //loop through characters of line
+    //loop through characters of lines until EOF
     do {
       char ch = 0;
       read_bytes = read(fd, &ch, 1);     // read 1 char at a time
       buff[count] = ch;                  // populate buffer
-      if(buff[count] == '\n')            // exit line for \n char
+      if(ch == '\n')            // exit line for \n char
         break;
       count++;                           // otherwise keep looping        
     }
     while (read_bytes != 0);             // EOF break
+
+    if (read_bytes == 0)                 // dont write junk if EOF (fixed the > issue)
+      break;                             // need to fix the < issue
+    
     write(STDOUT_FILENO, buff, count+1); // write line buffer to stdout
     count = 0; 
     memset( buff, 0, SIZE);              // reset for next line or file
