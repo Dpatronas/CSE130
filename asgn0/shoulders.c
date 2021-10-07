@@ -32,7 +32,7 @@ int isDigit(char* num){
 int main(int argc, char** argv) {
   int lines;                    // argv[1]
   int fd;                       // file descriptor
-  static char buff[SIZE];       // buffer to hold file contents
+  char buff[SIZE];       // buffer to hold file contents
   int read_bytes = 0;           // bytes read
   int count = 0;                // keeps track of characters for buffer
 
