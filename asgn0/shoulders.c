@@ -24,7 +24,7 @@ int isDigit(char* num) {
   return 1;
 }
 
-void ProcessInput(int infile, unsigned int totlines) {
+void ProcessInput(int infile, int totlines) {
 
   char* readbuff = (char *)malloc(INPUT_BUFFER_SIZE);
   if (!readbuff) {
