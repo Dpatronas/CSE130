@@ -11,7 +11,7 @@
 #include <stdint.h> // uint_8t
 #include <string.h>
 
-int const SIZE = 10000;
+int const SIZE = 1024;
 
 //Citations / Resources:
 // stderr functions:
@@ -31,8 +31,8 @@ int isDigit(char* num) {
 
 // Used to populate buffer and write to fd
 // fd = file or stdout
-void Buffer(int lines, int fd) {
-  char buff[SIZE];        // buffer to hold file contents
+void Buffer(char * buff, int lines, int fd) {
+  
   int read_bytes = 0;     // bytes read
   int count = 0;          // keeps track of characters for buffer
 
@@ -42,15 +42,15 @@ void Buffer(int lines, int fd) {
     do {
       char ch = 0;
       read_bytes = read(fd, &ch, 1);     // read 1 char at a time
-      buff[count] = ch;                  // populate buffer
-      if(ch == '\n')            // exit line for \n char
+      *(buff+count) = ch;                // populate buffer
+      if(ch == '\n')                     // exit line for \n char
         break;
       count++;                           // otherwise keep looping        
     }
     while (read_bytes != 0);             // EOF break
 
-    if (read_bytes == 0)                 // dont write junk if EOF (fixed the > issue)
-      break;                             // need to fix the < issue
+    if (read_bytes == 0)                 // dont write junk if EOF
+      break;                             
     
     write(STDOUT_FILENO, buff, count+1); // write line buffer to stdout
     count = 0; 
@@ -59,8 +59,12 @@ void Buffer(int lines, int fd) {
 }
 
 int main(int argc, char** argv) {
-  int lines;              // argv[1]
-  int fd;                 // file descriptor
+  char* buff = (char *)malloc(SIZE);      // buffer to hold file contents
+  if (!buff)
+    fprintf(stderr, "Bad malloc!");
+  int lines;                              // argv[1]
+  int fd;                                 // file descriptor
+
   //no CLI args
   if(argc == 1) 
     fprintf(stderr, "shoulders: requires an argument");
@@ -80,7 +84,7 @@ int main(int argc, char** argv) {
 
       // no file args
       if (argc == 2) {
-        Buffer(lines, STDIN_FILENO);
+        Buffer(buff, lines, STDIN_FILENO);
       }
     }
 
@@ -89,7 +93,7 @@ int main(int argc, char** argv) {
 
       // -file
       if (strncmp(argv[i], "-", 1) ==0) {
-        Buffer(lines, STDIN_FILENO);
+        Buffer(buff, lines, STDIN_FILENO);
         continue;
       }
 
@@ -98,8 +102,9 @@ int main(int argc, char** argv) {
         warn("cannot open '%s'", argv[i]);         // bad file open
         continue;
       }
-      Buffer(lines, fd);
+      Buffer(buff, lines, fd);
     }
   }
+  free(buff);
   return 0;
 }
