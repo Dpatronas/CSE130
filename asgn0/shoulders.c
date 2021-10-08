@@ -2,68 +2,76 @@
 // Homework 1
 // Despina Patronas
 
-#include <stdio.h>  // error msg only - fprintf(), perror()
-#include <err.h>    // error msg -  warn(3)
-#include <unistd.h> // sys calls - read(2) / write(2) / close(2)
-#include <fcntl.h>  // open(2)
+#include <stdio.h>  // fprintf(stderr)
+#include <err.h>    // error msg - warn() / err()
+#include <unistd.h> // sys calls - read() / write() / close()
+#include <fcntl.h>  // open()
 #include <ctype.h>  // isDigit()
-#include <stdlib.h> // strtol()
-#include <stdint.h> // uint_8t
+#include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 
-int const SIZE = 1024;
-
-//Citations / Resources:
-// stderr functions:
-//    https://www.qnx.com/developers/docs/6.5.0SP1.update/com.qnx.doc.neutrino_lib_ref/e/err.html
+const int INPUT_BUFFER_SIZE = 2048;
 
 // Returns 1 when chars of string are digits, else returns 0
 int isDigit(char* num) {
-  int len = strlen(num);
-  char *n = num;
 
-  for (int i=0; i<len; i++) 
-    if(!isdigit(n[i])) 
+  int len = strlen(num);
+  for (int i=0; i<len; i++)
+    if(!isdigit(num[i]))
       return 0;
 
   return 1;
 }
 
-// Used to populate buffer and write to fd
-// fd = file or stdout
-void Buffer(char * buff, int lines, int fd) {
-  
-  int read_bytes = 0;     // bytes read
-  int count = 0;          // keeps track of characters for buffer
+void ProcessInput(int infile, unsigned int totlines) {
 
-  //loop through lines                   
-  for (int j = 0; j < lines; j++) {
-    //loop through characters of lines until EOF
-    do {
-      char ch = 0;
-      read_bytes = read(fd, &ch, 1);     // read 1 char at a time
-      *(buff+count) = ch;                // populate buffer
-      if(ch == '\n')                     // exit line for \n char
-        break;
-      count++;                           // otherwise keep looping        
-    }
-    while (read_bytes != 0);             // EOF break
-
-    if (read_bytes == 0)                 // dont write junk if EOF
-      break;                             
-    
-    write(STDOUT_FILENO, buff, count+1); // write line buffer to stdout
-    count = 0; 
-    memset( buff, 0, SIZE);              // reset for next line or file
+  char* readbuff = (char *)malloc(INPUT_BUFFER_SIZE);
+  if (!readbuff) {
+    fprintf(stderr, "Bad malloc!");
+    return;
   }
+  
+  int plines = 0;
+
+  do {
+    int rcount = read(infile, readbuff, INPUT_BUFFER_SIZE);
+    if (rcount <= 0)
+      break;
+
+    char* tmp = readbuff;
+    int charcnt = 0;
+
+    //loop through characters of readbuff
+    for (int c = 0; c < rcount; c++) {
+      charcnt++;
+
+      // end of line, or end of buffer
+      int condition_eol = (readbuff[c] == '\n');
+      int condition_eob = (c == (rcount - 1));
+
+      if ( condition_eol || condition_eob ){
+        if (condition_eol){
+          plines++;
+        }
+
+        write(STDOUT_FILENO, tmp, charcnt);
+        charcnt = 0;
+        tmp     = &readbuff[c + 1];
+      }
+
+      if (plines >= totlines) 
+        break;
+    }
+  } 
+  while(plines < totlines);
+
+  free(readbuff);
 }
 
 int main(int argc, char** argv) {
-  char* buff = (char *)malloc(SIZE);      // buffer to hold file contents
-  if (!buff)
-    fprintf(stderr, "Bad malloc!");
-  int lines;                              // argv[1]
-  int fd;                                 // file descriptor
+  int lines;
+  int fd;
 
   //no CLI args
   if(argc == 1) 
@@ -72,39 +80,41 @@ int main(int argc, char** argv) {
   //Loop through CLI args
   for (int i = 0; i < argc; i++) {
 
-    //Lines CLI arg
-    if(i==1) {
-      if(strncmp(argv[1],"-qn", 3)==0)                
-        fprintf(stderr,"shoulders: option requires an argument -- 'n' \nTry ‘shoulders --help' for more information.");
-
-      else if(atoi(argv[1])<0 || !isDigit(argv[1])) {
+    //Line (n)
+    if(i == 1) {
+      // No n arg
+      if(strncmp(argv[1],"-qn", 3) == 0) {
+        fprintf(stderr,"shoulders: option requires an argument -- 'n'");
+        fprintf(stderr,"\nTry ‘shoulders --help' for more information.");
+      }
+      // Invalid n
+      else if(atoi(argv[1]) < 0 || !isDigit(argv[1])) {
         errx(1, "invalid number of lines: '%s'", argv[1]);
       }
+      
       lines = atoi(argv[1]);
 
-      // no file args
+      // No file arg
       if (argc == 2) {
-        Buffer(buff, lines, STDIN_FILENO);
+        ProcessInput(STDIN_FILENO, lines);
       }
     }
 
-    // Files CLI args
-    if(i>=2) {
-
-      // -file
-      if (strncmp(argv[i], "-", 1) ==0) {
-        Buffer(buff, lines, STDIN_FILENO);
+    // Files
+    if(i >= 2) {
+      // (-) Dash file arg
+      if (strncmp(argv[i], "-", 1) == 0) {
+        ProcessInput(STDIN_FILENO, lines);
         continue;
       }
-
-      // open file
-      if ((fd = open(argv[i], O_RDONLY, 0)) < 0) { // open file for arg             
+      // Open file arg
+      if ((fd = open(argv[i], O_RDONLY, 0)) < 0) { // open file for arg
         warn("cannot open '%s'", argv[i]);         // bad file open
         continue;
       }
-      Buffer(buff, lines, fd);
+      ProcessInput(fd, lines);
     }
   }
-  free(buff);
+  close(fd);
   return 0;
 }
