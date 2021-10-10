@@ -87,11 +87,15 @@ int main(int argc, char** argv) {
         fprintf(stderr,"shoulders: option requires an argument -- 'n'");
         fprintf(stderr,"\nTry ‘shoulders --help' for more information.");
       }
+
       // Invalid n
-      else if(atoi(argv[1]) < 0 || !isDigit(argv[1])) {
+      else if(atoi(argv[1]) < 0 || !isDigit(argv[1]))
         errx(1, "invalid number of lines: '%s'", argv[1]);
-      }
       
+      // Exit on 0
+      else if (atoi(argv[1]) == 0)
+        return 0;
+
       lines = atoi(argv[1]);
 
       // No file arg
