@@ -2,70 +2,66 @@
 // Homework 1
 // Despina Patronas
 
-#include <stdio.h>  // fprintf(stderr)
-#include <err.h>    // error msg - warn() / err()
-#include <unistd.h> // sys calls - read() / write() / close()
+#include <stdio.h>  // error msg - fprintf(stderr)
+#include <err.h>    // error msg - warn(), errx()
+#include <unistd.h> // sys calls - read(), write(), close()
 #include <fcntl.h>  // open()
-#include <ctype.h>  // isDigit()
-#include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
+#include <ctype.h>  // isdigit()
+#include <stdlib.h> // atoi()
+#include <string.h> // strncmp()
 
 const int INPUT_BUFFER_SIZE = 2048;
 
 // Returns 1 when chars of string are digits, else returns 0
 int isDigit(char* num) {
-
   int len = strlen(num);
-  for (int i=0; i<len; i++)
+
+  for(int i=0; i<len; i++)
     if(!isdigit(num[i]))
       return 0;
-
+      
   return 1;
 }
 
-void ProcessInput(int infile, int totlines) {
+void processInput(int inFile, unsigned int totlines) {
+  int isDone = 0;
+  unsigned int linesFound = 0;
 
   char* readbuff = (char *)malloc(INPUT_BUFFER_SIZE);
-  if (!readbuff) {
+  if(!readbuff) {
     fprintf(stderr, "Bad malloc!");
     return;
   }
-  
-  int plines = 0;
 
-  do {
-    int rcount = read(infile, readbuff, INPUT_BUFFER_SIZE);
-    if (rcount <= 0)
+  while(!isDone) {
+    int rdCount = read(inFile, readbuff, INPUT_BUFFER_SIZE);
+    int lastLine = 0;
+
+    if(rdCount <= 0)
       break;
 
-    char* tmp = readbuff;
-    int charcnt = 0;
+    // Buffer contains the last line
+    else if(rdCount < INPUT_BUFFER_SIZE)
+      lastLine = 1;
 
-    //loop through characters of readbuff
-    for (int c = 0; c < rcount; c++) {
-      charcnt++;
-
-      // end of line, or end of buffer
-      int condition_eol = (readbuff[c] == '\n');
-      int condition_eob = (c == (rcount - 1));
-
-      if ( condition_eol || condition_eob ){
-        if (condition_eol){
-          plines++;
+    // Count newlines for the buffer
+    for(int i = 0; i < INPUT_BUFFER_SIZE; i++) {
+      if (readbuff[i] == '\n') {
+        linesFound++;
+  
+  // Found all lines requested OR at end of last buffer
+        if((linesFound == totlines) || (lastLine && i == rdCount)) {
+          write(STDOUT_FILENO, readbuff, i + 1);
+          isDone = 1;
+          break;
         }
-
-        write(STDOUT_FILENO, tmp, charcnt);
-        charcnt = 0;
-        tmp     = &readbuff[c + 1];
       }
-
-      if (plines >= totlines) 
-        break;
     }
-  } 
-  while(plines < totlines);
-
+    // Write out full buffer
+    if(!isDone) {
+      write(STDOUT_FILENO, readbuff, rdCount);
+    }
+  }
   free(readbuff);
 }
 
@@ -87,11 +83,11 @@ int main(int argc, char** argv) {
         fprintf(stderr,"shoulders: option requires an argument -- 'n'");
         fprintf(stderr,"\nTry ‘shoulders --help' for more information.");
       }
-
+      
       // Invalid n
       else if(atoi(argv[1]) < 0 || !isDigit(argv[1]))
         errx(1, "invalid number of lines: '%s'", argv[1]);
-      
+
       // Exit on 0
       else if (atoi(argv[1]) == 0)
         return 0;
@@ -100,7 +96,7 @@ int main(int argc, char** argv) {
 
       // No file arg
       if (argc == 2) {
-        ProcessInput(STDIN_FILENO, lines);
+        processInput(STDIN_FILENO, lines);
       }
     }
 
@@ -108,7 +104,7 @@ int main(int argc, char** argv) {
     if(i >= 2) {
       // (-) Dash file arg
       if (strncmp(argv[i], "-", 1) == 0) {
-        ProcessInput(STDIN_FILENO, lines);
+        processInput(STDIN_FILENO, lines);
         continue;
       }
       // Open file arg
@@ -116,7 +112,7 @@ int main(int argc, char** argv) {
         warn("cannot open '%s'", argv[i]);         // bad file open
         continue;
       }
-      ProcessInput(fd, lines);
+      processInput(fd, lines);
     }
   }
   close(fd);
