@@ -31,6 +31,7 @@ const char* Status(int code) {
     case 500: return "Internal Server Error"; // Request is valid but cannot allocate memory to process request
     case 501: return "Not Implemented";       // Request is valid is ok BUT command not valid
   }
+  return NULL;
 }
 
 // Send client response for request
@@ -79,7 +80,7 @@ int create_listen_socket(uint16_t port) {
 
 
 void processInput(int infile, int len, int outfile, char * op) {
-  int isDone = 0; int tot_read;
+  int isDone = 0; int tot_read = 0;
 
   char* readbuff = (char *)malloc(PROCESS_BODY_SIZE);
   if(!readbuff) {
@@ -131,15 +132,14 @@ void processInput(int infile, int len, int outfile, char * op) {
       }
     }
   }
-  write(outfile, '\0', 1);  //insert eof?
+  // write(outfile, '\0', 1);  //insert eof?
   free(readbuff);
 }
 
 
 void ParsePut(char *m, char *r, int len, int connfd) {
 
-  int rec, tot_inputs, outfile;
-  char putbuff[PROCESS_BODY_SIZE];
+  int outfile;
 
   printf("length = %d\n", len);  printf("outfile = %s\n", r);
 
@@ -196,7 +196,7 @@ void ParseRequest(char *request, int connfd) {
   int len;
 
   // Populate request fields
-  int tot_inputs = sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , m, r, v, name, value, extra, extra, extra, extra, content, &len);
+  sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , m, r, v, name, value, extra, extra, extra, extra, content, &len);
   printf("command = %s\n resource = %s\n version = %s\n name = %s\n value = %s\n content = %s\n len = %d\n\n", m, r, v, name, value, content, len); 
   
   memmove(r, r+1, strlen(r)); //remove the backslash from file
@@ -236,7 +236,7 @@ void ParseRequest(char *request, int connfd) {
 void handle_connection(int connfd) {
 
   char request[HEADER_SIZE];   
-  int rec, sent, write, rd = 0;
+  int rec = 0;
 
   // Server maintains connection
   while(1) {
