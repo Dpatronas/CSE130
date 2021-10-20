@@ -122,11 +122,11 @@ void processInput(int infile, int len, int outfile, char * op) {
     if(!isDone) {
       if (strncmp(op,"GET",3) == 0) {
         write(STDOUT_FILENO, readbuff, rdCount); //debug server msg
-        send(outfile, readbuff, rdCount);
+        send(outfile, readbuff, rdCount, 0);
       }
       else {
         write(STDOUT_FILENO, readbuff, rdCount); //debug server msg
-        write(outfile, readbuff, rdCount, 0);
+        write(outfile, readbuff, rdCount);
       }
     }
   }
