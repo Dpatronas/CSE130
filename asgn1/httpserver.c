@@ -15,9 +15,10 @@
 #include <sys/types.h>
 
 #define HEADER_SIZE       1024          // 1KiB max header length
-#define PROCESS_BODY_SIZE 2048
+#define PROCESS_BODY_SIZE 4096
 
 extern int errno;
+
 struct stat st;
 
 // status code options
@@ -105,6 +106,12 @@ void processInput(int infile, int len, int outfile, char * m) {
     int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
 
     if(rdCount <= 0) {
+      // if (strncmp(m,"GET",3) == 0) {
+      //   ServerResponse(outfile, 500, len, m);
+      // }
+      // else {
+      //   ServerResponse(infile, 500, len, m);     
+      // }
       break;
     }
 
@@ -165,17 +172,23 @@ int ParsePut(char *m, char *r, int len, int connfd) {
     return -1; 
   }
 
+  // empty file contents nothing to process
+  if (len == 0) {
+    return code;
+  }
+
   processInput(connfd, len, outfile, m); //write recv'd bytes into file resource
 
+  printf("file processed\n");
   return code;
 }
 
 
 /**
- * Parses GET Request
+ * Parses GET or HEAD Request
  *  Checks whether file resources exists and/or is accessible.
 */
-void ParseGet(char *m, char *r, int connfd) {
+void ParseGetHead(char *m, char *r, int connfd) {
 
   int infile; int len;
 
@@ -183,11 +196,11 @@ void ParseGet(char *m, char *r, int connfd) {
   if ((infile = open(r, O_RDONLY, 0)) < 0) {              // open file
     warn("cannot open '%s' due to ernno: %d", r, errno);  // bad file open
 
-    if (errno == 2) {
-      ServerResponse(connfd, 404, 0, m); // File DNE
+    if (errno == 2) {                                     // check errno for status code
+      ServerResponse(connfd, 404, 0, m); // DNE
     }
     else {
-      ServerResponse(connfd, 403, 0, m); // File Forbidden
+      ServerResponse(connfd, 403, 0, m); // Forbidden
     }
     return;
   }
@@ -195,9 +208,12 @@ void ParseGet(char *m, char *r, int connfd) {
   stat(r, &st);
   len = st.st_size;
 
-  // Otherwise, send response & perform GET
+  // Otherwise, send response
   ServerResponse(connfd, 200, len, m);
-  processInput(infile, len, connfd, m);
+
+  if (strncmp(m,"GET",3) == 0) {
+    processInput(infile, len, connfd, m);
+  }
 }
 
 
@@ -212,39 +228,33 @@ int BadRequest(char *r, char *v, char *name, char *value) {
 
   // Bad Version
   if (!(strncmp(v,"HTTP/1.1",8) == 0)) {
-    printf("BAD VERSION");
     return 1;
   }
 
-  else if (sizeof(r)-1 > 20) {
-    printf("BAD FILE NAME LENGTH");
+  if (!(strncmp(r, "//", 1) == 0)) {
+    return 1;
+  }
+
+  memmove(r, r+1, strlen(r)); //remove the backslash from file
+
+  if (strlen(r) > 19) {
     return 1;
   }
 
   else if (!(strncmp(name,"Host",4) == 0)) {
-    printf("BAD HOST");
     return 1;
   }
 
-  for (size_t i = 0; i < sizeof(value)-1; i++) {
+  for (size_t i = 0; i < strlen(value); i++) {
     if (isspace(value[i])) {
-      printf("BAD VALUE");
-
       return 1;
     }
   }
 
-  for (size_t i = 0; i < sizeof(r)-1; i++) {
-
-    if ((r[i] >= 'a' && r[i] <= 'z') ||
-        (r[i] >= 'A' && r[i] <= 'Z') ||
-        (r[i] >= '1' && r[i] <= '9') ||
-        (r[i] == '_'))
-    {
-      return 0;
+  for (size_t i = 0; i < strlen(r); i++) {
+    if ( !(isalnum(r[i])) && (r[i] != '_') && (r[i] != '.')) {
+      return 1;
     }
-    printf("BAD FILE");
-    return 1;
   }
   return 0;
 }
@@ -265,35 +275,35 @@ void ParseRequest(char *request, int connfd) {
   // Populate request fields
   sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , 
   m, r, v, name, value, extra, extra, extra, extra, content, &len);
-  printf("command = %s\n resource = %s\n version = %s\n name = %s\n value = %s\n content = %s\n len = %d\n", m, r, v, name, value, content, len); 
   
-  memmove(r, r+1, strlen(r)); //remove the backslash from file
-
   // Check Request Line
   if (BadRequest(r, v, name, value)) {
     ServerResponse(connfd, 400, 0, m);
     return;
   }
 
-  // Check Commands
-  // GET
+  // Check commands
   if (strncmp(m,"GET",3) == 0) {
-    ParseGet(m, r, connfd);
-    return;
-  }
-  // PUT
-  else if (strncmp(m,"PUT",3) == 0) {
-    int code = ParsePut(m, r, len, connfd);
-    ServerResponse(connfd, code, strlen(Status(code))+1, m);
-    return;
-  }
-  // HEAD
-  else if (strncmp(m, "HEAD",4) == 0) {
-    ServerResponse(connfd, 200, 3, m);
+    ParseGetHead(m, r, connfd);
     return;
   }
 
-  // OTHER
+  else if (strncmp(m, "HEAD",4) == 0) {
+    ParseGetHead(m, r, connfd);
+    return;
+  }
+
+  else if (strncmp(m,"PUT",3) == 0) {
+    int putCode = ParsePut(m, r, len, connfd);
+    if (putCode == 201) {
+      ServerResponse(connfd, 201, 8, m);
+    }
+    else {
+      ServerResponse(connfd, 200, 3, m);
+    }
+    return;
+  }
+
   else {
     ServerResponse(connfd, 501, 0, m);
     return;
