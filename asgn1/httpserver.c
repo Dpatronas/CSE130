@@ -38,9 +38,7 @@ const char* Status(int code) {
 void ServerResponse(int connfd, int code, int length) {
 
   char response[HEADER_SIZE];
-
-  sprintf(response, "\nHTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", code, Status(code), length);
-
+  sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", code, Status(code), length);
   int s = send(connfd, response, strlen(response), 0);
   if (s < 0) { warn("send()"); }
 }
@@ -124,11 +122,11 @@ void processInput(int infile, int len, int outfile, char * op) {
     if(!isDone) {
       if (strncmp(op,"GET",3) == 0) {
         write(STDOUT_FILENO, readbuff, rdCount); //debug server msg
-        write(outfile, readbuff, rdCount);
+        send(outfile, readbuff, rdCount);
       }
       else {
         write(STDOUT_FILENO, readbuff, rdCount); //debug server msg
-        send(outfile, readbuff, rdCount, 0);
+        write(outfile, readbuff, rdCount, 0);
       }
     }
   }
@@ -176,6 +174,7 @@ void ParseGet(char *m, char *r, int connfd) {
   len = st.st_size;
   printf("\nlength = %d\n", len);
 
+  ServerResponse(connfd, 200, len);
   // Otherwise perform GET
   processInput(infile, len, connfd, m);
   return;
@@ -210,7 +209,6 @@ void ParseRequest(char *request, int connfd) {
   // Check commands
   if (strncmp(m,"GET",3) == 0) {
     ParseGet(m, r, connfd);
-    ServerResponse(connfd, 200, 3);
     return;
   }
 
