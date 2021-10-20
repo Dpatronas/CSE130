@@ -216,7 +216,7 @@ int BadRequest(char *r, char *v, char *name, char *value) {
     return 1;
   }
 
-  else if (strlen(r) > 20) {
+  else if (sizeof(r)-1 > 20) {
     printf("BAD FILE NAME LENGTH");
     return 1;
   }
@@ -226,7 +226,7 @@ int BadRequest(char *r, char *v, char *name, char *value) {
     return 1;
   }
 
-  for (int i = 0; i < strlen(value); i++) {
+  for (size_t i = 0; i < sizeof(value)-1; i++) {
     if (isspace(value[i])) {
       printf("BAD VALUE");
 
@@ -234,7 +234,7 @@ int BadRequest(char *r, char *v, char *name, char *value) {
     }
   }
 
-  for (int i = 0; i < strlen(r); i++) {
+  for (size_t i = 0; i < sizeof(r)-1; i++) {
 
     if ((r[i] >= 'a' && r[i] <= 'z') ||
         (r[i] >= 'A' && r[i] <= 'Z') ||
