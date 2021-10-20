@@ -35,11 +35,18 @@ const char* Status(int code) {
 }
 
 // Send client response for request
-void ServerResponse(int connfd, int code, int length) {
+void ServerResponse(int connfd, int code, int length, char * m) {
 
-  char response[HEADER_SIZE];
+  char response[HEADER_SIZE]; int s;
+
+  if (strncmp(m,"PUT",3) == 0) {
+    sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s\n", code, Status(code), length, Status(code));
+    s = send(connfd, response, strlen(response), 0); 
+    if (s < 0) { warn("send()"); }
+    return;
+  }
   sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", code, Status(code), length);
-  int s = send(connfd, response, strlen(response), 0);
+  s = send(connfd, response, strlen(response), 0);
   if (s < 0) { warn("send()"); }
 }
 
@@ -77,7 +84,14 @@ int create_listen_socket(uint16_t port) {
 }
 
 
-void processInput(int infile, int len, int outfile, char * op) {
+/**
+  Process buffer requests
+  If performing GET: infile is resource file, outfile is socket body
+  If performing PUT: infile is socket body, outfile is resource file
+    m:   command from request
+    len: length of bytes to buffer in / out.
+*/
+void processInput(int infile, int len, int outfile, char * m) {
   int isDone = 0; int tot_read = 0;
 
   char* readbuff = (char *)malloc(PROCESS_BODY_SIZE);
@@ -90,82 +104,101 @@ void processInput(int infile, int len, int outfile, char * op) {
     int lastLine = 0;
     int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
 
-    // printf("ReadIN: %d\n", rdCount);
-    // printf("buffer: %s", readbuff);
-
-    if(rdCount <= 0)
+    if(rdCount <= 0) {
+      if (strncmp(m,"GET",3) == 0) {
+        ServerResponse(outfile, 500, len, m);
+      }
+      else {
+        ServerResponse(infile, 500, len, m);     
+      }
       break;
+    }
 
     // Buffer contains the last line
     if(rdCount < PROCESS_BODY_SIZE)
       lastLine = 1;
 
-    // Count newlines for the buffer
     for(int i = 0; i < PROCESS_BODY_SIZE; i++) {
       tot_read++;
       // Real all bytes OR at end of last buffer
       if ((lastLine && i == rdCount) || tot_read == len)  {
-        if (strncmp(op,"GET",3) == 0) {
-            write(STDOUT_FILENO, readbuff, i + 1); //debug server msg
-            send(outfile, readbuff, i + 1, 0); //
-        }
-        else {
-          write(STDOUT_FILENO, readbuff, i + 1); //debug server msg
-          write(outfile, readbuff, i + 1); //
-        }
 
+        if (strncmp(m,"GET",3) == 0) {
+          send(outfile, readbuff, i + 1, 0);
+          write(STDOUT_FILENO, readbuff, i + 1); //debug server msg
+        }
+        else { //PUT
+          write(outfile, readbuff, i + 1); //Write contents to outfile
+        }
         isDone = 1;
         break;
       }
     }
-    // Write out full buffer
+    // Full buffer
     if(!isDone) {
-      if (strncmp(op,"GET",3) == 0) {
-        write(STDOUT_FILENO, readbuff, rdCount); //debug server msg
+
+      if (strncmp(m,"GET",3) == 0) {
         send(outfile, readbuff, rdCount, 0);
-      }
-      else {
         write(STDOUT_FILENO, readbuff, rdCount); //debug server msg
+      }
+
+      else { //PUT
         write(outfile, readbuff, rdCount);
       }
     }
   }
-  // write(outfile, '\0', 1);  //insert eof?
+
   free(readbuff);
 }
 
 
-void ParsePut(char *m, char *r, int len, int connfd) {
+/**
+ * Parses Put Request
+ *  Checks whether to create or truncate existing file
+*/
+int ParsePut(char *m, char *r, int len, int connfd) {
 
-  int outfile;
+  int outfile; int code;
 
   printf("length = %d\n", len);  printf("outfile = %s\n", r);
 
-  outfile = open(r, O_RDWR | O_CREAT | O_TRUNC, 0777);           //create resource file
+  if (access(r, F_OK) == 0) {
+    code = 200;  // truncate code OK
+  }
+  else {
+    code = 201;  // create code CREATED
+  }
+
+  outfile = open(r, O_RDWR | O_CREAT | O_TRUNC, 0777); // PUT resource file
   if (outfile < 0) { 
     warn("creating outfile error"); 
-    return; 
+    return -1; 
   }
 
   processInput(connfd, len, outfile, m); //write recv'd bytes into file resource
 
   printf("file processed\n");
-  return;
+  return code;
 }
 
 
+/**
+ * Parses GET Request
+ *  Checks whether file resources exists and/or is accessible.
+*/
 void ParseGet(char *m, char *r, int connfd) {
 
   int infile; int len;
 
-  // Check file exists
+  // Check errors
   if ((infile = open(r, O_RDONLY, 0)) < 0) {              // open file
     warn("cannot open '%s' due to ernno: %d", r, errno);  // bad file open
+
     if (errno == 2) {                                     // check errno for status code
-      ServerResponse(connfd, 404, 0);
+      ServerResponse(connfd, 404, 0, m); // DNE
     }
     else {
-      ServerResponse(connfd, 403, 0);
+      ServerResponse(connfd, 403, 0, m); // Forbidden
     }
     return;
   }
@@ -174,35 +207,33 @@ void ParseGet(char *m, char *r, int connfd) {
   len = st.st_size;
   printf("\nlength = %d\n", len);
 
-  ServerResponse(connfd, 200, len);
-  // Otherwise perform GET
+  // Otherwise, send response & perform GET
+  ServerResponse(connfd, 200, len, m);
   processInput(infile, len, connfd, m);
-  return;
 }
-
 
 
 /**
  * Parse ASCII request fields (space seperated)
- *  m = commands   (GET,PUT,HEAD)
- *  r = resource   (Some file)
- *  v = version    (HTTP/1.1)
+ *  m: commands   (GET,PUT,HEAD)
+ *  r: resource   (Some file)
+ *  v: version    (HTTP/1.1)
 */
 void ParseRequest(char *request, int connfd) {
-  char m[100];     char r[100]; char v[100];  // Request
-  char name[100];  char value[100];           // Header
-  char extra[100]; char content[100];         // Body
-  int len;
+  char m[100], r[100], v[100];  // Request
+  char name[100], value[100];   // Header
+  char extra[100], content[100];
+  int len; int putCode;
 
   // Populate request fields
-  sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , m, r, v, name, value, extra, extra, extra, extra, content, &len);
-  printf("command = %s\n resource = %s\n version = %s\n name = %s\n value = %s\n content = %s\n len = %d\n\n", m, r, v, name, value, content, len); 
+  sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , 
+  m, r, v, name, value, extra, extra, extra, extra, content, &len);
   
   memmove(r, r+1, strlen(r)); //remove the backslash from file
 
   // Bad version
   if (!(strncmp(v,"HTTP/1.1",8) == 0)) {
-    ServerResponse(connfd, 400, 0);
+    ServerResponse(connfd, 400, 0, m);
     return;
   }
 
@@ -214,18 +245,23 @@ void ParseRequest(char *request, int connfd) {
 
   //----------------------------------------------------------------------
   else if (strncmp(m,"PUT",3) == 0) {
-    ParsePut(m, r, len, connfd);
-    ServerResponse(connfd, 201, 8);
+    putCode = ParsePut(m, r, len, connfd);
+    if (putCode == 201) {
+      ServerResponse(connfd, 201, 8, m);
+    }
+    else {
+      ServerResponse(connfd, 200, 3, m);
+    }
     return;
   }
 
-  // else if (strncmp(m, "HEAD",4) == 0) {
-  //   ParseHead(m,r, connfd);
-  //   return;
-  // }
+  else if (strncmp(m, "HEAD",4) == 0) {
+    ServerResponse(connfd, 200, 3, m);
+    return;
+  }
 
   else {
-    ServerResponse(connfd, 501, 0);
+    ServerResponse(connfd, 501, 0, m);
     return;
   }
 }
@@ -242,14 +278,14 @@ void handle_connection(int connfd) {
     memset(request,0,sizeof request);
 
     // Receive new request from client
-    rec = recv(connfd, request, HEADER_SIZE, 0);    // Assume request makes it in one line
+    rec = recv(connfd, request, HEADER_SIZE, 0); // Assume request makes it in one line
     if (rec < 0) { warn("recv"); break; }        // Bad recv from client
     if (rec == 0){ break; }                      // Client exits connection
 
     printf("the request: \n%s\n", request);
 
-    // Parse received request
     ParseRequest(request, connfd);
+    return;
   }
 
   close(connfd);
