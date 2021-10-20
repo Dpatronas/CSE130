@@ -7,9 +7,8 @@
 #include <errno.h>      // check warnings
 #include <fcntl.h>      // open()
 #include <sys/stat.h>   // fstat
-
-#include <regex.h>
 #include <ctype.h>
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -20,7 +19,6 @@
 
 extern int errno;
 struct stat st;
-#define REG "^[a-zA-Z0-9_]*$"
 
 // status code options
 const char* Status(int code) {
@@ -154,8 +152,6 @@ int ParsePut(char *m, char *r, int len, int connfd) {
 
   int outfile; int code;
 
-  printf("length = %d\n", len);  printf("outfile = %s\n", r);
-
   if (access(r, F_OK) == 0) {
     code = 200;  // truncate code OK
   }
@@ -171,7 +167,6 @@ int ParsePut(char *m, char *r, int len, int connfd) {
 
   processInput(connfd, len, outfile, m); //write recv'd bytes into file resource
 
-  printf("file processed\n");
   return code;
 }
 
@@ -199,7 +194,6 @@ void ParseGet(char *m, char *r, int connfd) {
 
   stat(r, &st);
   len = st.st_size;
-  printf("\nlength = %d\n", len);
 
   // Otherwise, send response & perform GET
   ServerResponse(connfd, 200, len, m);
@@ -214,35 +208,45 @@ void ParseGet(char *m, char *r, int connfd) {
  * name: Host 
  * ex value: 10.0.0.5
 */
-int BadRequest(regex_t regx, char *r, char *v, char *name, char *value) {
+int BadRequest(char *r, char *v, char *name, char *value) {
 
   // Bad Version
   if (!(strncmp(v,"HTTP/1.1",8) == 0)) {
-    return 1;
-  }
-
-  else if (!(strncmp(r,"//",1) == 0)) {
+    printf("BAD VERSION");
     return 1;
   }
 
   else if (strlen(r) > 20) {
-    return 1;
-  }
-
-  if (regcomp(&regx, REG, REG_EXTENDED)) {
+    printf("BAD FILE NAME LENGTH");
     return 1;
   }
 
   else if (!(strncmp(name,"Host",4) == 0)) {
+    printf("BAD HOST");
     return 1;
   }
 
-  for (int i = 0; i < strlen(value); i++)
-    if (isspace(name[i]))
+  for (int i = 0; i < strlen(value); i++) {
+    if (isspace(value[i])) {
+      printf("BAD VALUE");
+
       return 1;
+    }
+  }
 
-  else return 0;
+  for (int i = 0; i < strlen(r); i++) {
 
+    if ((r[i] >= 'a' && r[i] <= 'z') ||
+        (r[i] >= 'A' && r[i] <= 'Z') ||
+        (r[i] >= '1' && r[i] <= '9') ||
+        (r[i] == '_'))
+    {
+      return 0;
+    }
+    printf("BAD FILE");
+    return 1;
+  }
+  return 0;
 }
 
 
@@ -256,29 +260,22 @@ void ParseRequest(char *request, int connfd) {
   char m[100], r[100], v[100];  // Request
   char name[100], value[100];   // Header
   char extra[100], content[100];
-  int len; int putCode;
-  regex_t regx;
+  int len;
 
   // Populate request fields
   sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , 
   m, r, v, name, value, extra, extra, extra, extra, content, &len);
   printf("command = %s\n resource = %s\n version = %s\n name = %s\n value = %s\n content = %s\n len = %d\n", m, r, v, name, value, content, len); 
   
-  // Check Request Line
-  if (BadRequest(regx, r, v, name, value)) {
-    ServerResponse(connfd, 400, 0, m);
-    return;
-  }
-  // regfree(&regx);
   memmove(r, r+1, strlen(r)); //remove the backslash from file
 
-  // Bad version
-  if (!(strncmp(v,"HTTP/1.1",8) == 0)) {
+  // Check Request Line
+  if (BadRequest(r, v, name, value)) {
     ServerResponse(connfd, 400, 0, m);
     return;
   }
 
-  // Check commands
+  // Check Commands
   // GET
   if (strncmp(m,"GET",3) == 0) {
     ParseGet(m, r, connfd);
@@ -318,8 +315,6 @@ void handle_connection(int connfd) {
     rec = recv(connfd, request, HEADER_SIZE, 0); // Assume request makes it in one line
     if (rec < 0) { warn("recv"); break; }        // Bad recv from client
     if (rec == 0){ break; }                      // Client exits connection
-
-    // printf("the request: \n%s\n", request);
 
     ParseRequest(request, connfd);
     return;
