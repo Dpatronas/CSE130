@@ -327,7 +327,6 @@ void handle_connection(int connfd) {
     if (rec == 0){ break; }                      // Client exits connection
 
     ParseRequest(request, connfd);
-    return;
   }
 
   close(connfd);
