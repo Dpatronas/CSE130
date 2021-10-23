@@ -106,12 +106,6 @@ void processInput(int infile, int len, int outfile, char * m) {
     int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
 
     if(rdCount <= 0) {
-      // if (strncmp(m,"GET",3) == 0) {
-      //   ServerResponse(outfile, 500, len, m);
-      // }
-      // else {
-      //   ServerResponse(infile, 500, len, m);     
-      // }
       break;
     }
 
@@ -178,8 +172,6 @@ int ParsePut(char *m, char *r, int len, int connfd) {
   }
 
   processInput(connfd, len, outfile, m); //write recv'd bytes into file resource
-
-  printf("file processed\n");
   return code;
 }
 
@@ -270,13 +262,25 @@ void ParseRequest(char *request, int connfd) {
   char m[100], r[100], v[100];  // Request
   char name[100], value[100];   // Header
   char extra[100], content[100];
-  int len;
+  int len; int req;
 
-  // Populate request fields
-  sscanf(request, "%s %s %s %s %s %s %s %s %s %s %d" , 
-  m, r, v, name, value, extra, extra, extra, extra, content, &len);
+  // reset buffers
+  memset(m, 0, sizeof m); memset(r, 0, sizeof r); memset(v, 0, sizeof v);
+  memset(name, 0, sizeof name); memset(value, 0, sizeof value); memset(content, 0, sizeof content);
+
+  // Populate Request Line
+  sscanf(request, "%s %s %s %s", m, r, v, name);
+  req = strlen(m) + strlen(r) + strlen(v) + strlen(name) + 5;
+  request += req;                        // take request line out of request
+
+  // Populate Host Value
+  sscanf(request, "%[^\r\n]s", value);   // grab the host value
+  request += strlen(value) + 1;          // take out host value from request
+
+  // Get the Content Length 
+  sscanf(request, "%s %s %s %s %s %d", extra, extra, extra, extra, content, &len);
   
-  // Check Request Line
+  // Check Request
   if (BadRequest(r, v, name, value)) {
     ServerResponse(connfd, 400, 0, m);
     return;
