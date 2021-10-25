@@ -28,7 +28,7 @@ const char* Status(int code) {
     case 201: return "Created";       // Successful PUT resource
     case 400: return "Bad Request";   // Request is not valid ie: not parsable
     case 403: return "Forbidden";     // Cannot access valid resource file (for GET)
-    case 404: return "Not Found";     // Valid resource name but server cannot find file
+    case 404: return "File Not Found";     // Valid resource name but server cannot find file
     case 500: return "Internal Server Error"; // Request is valid but cannot allocate memory to process request
     case 501: return "Not Implemented";       // Request is valid is ok BUT command not valid
   }
@@ -93,7 +93,7 @@ int create_listen_socket(uint16_t port) {
     len: length of bytes to buffer in / out.
 */
 void processInput(int infile, int len, int outfile, char * m) {
-  int isDone = 0; int tot_read = 0;
+  int isDone = 0, tot_read = 0;
 
   char* readbuff = (char *)malloc(PROCESS_BODY_SIZE);
   if(!readbuff) {
@@ -182,17 +182,17 @@ int ParsePut(char *m, char *r, int len, int connfd) {
 */
 void ParseGetHead(char *m, char *r, int connfd) {
 
-  int infile, len = 0;
+  int infile; int len;
 
   // Check errors
   if ((infile = open(r, O_RDONLY, 0)) < 0) {              // open file
     warn("cannot open '%s' due to ernno: %d", r, errno);  // bad file open
 
     if (errno == 2) {                                     // check errno for status code
-      ServerResponse(connfd, 404, strlen(Status(404)) +1, m); // DNE
+      ServerResponse(connfd, 404, 0, m); // DNE
     }
     else {
-      ServerResponse(connfd, 403, strlen(Status(403)) +1, m); // Forbidden
+      ServerResponse(connfd, 403, 0, m); // Forbidden
     }
     return;
   }
@@ -259,38 +259,32 @@ int BadRequest(char *r, char *v, char *name, char *value) {
  *  v: version    (HTTP/1.1)
 */
 void ParseRequest(char *request, int connfd) {
-  char m[101], r[101], v[101], name[101];
-  static char value[101];
-  char ex1[101], ex2[101], ex3[101], ex4[101], content[101];
-  int len = 0; int req = 0;
+  char m[100], r[100], v[100];  // Request
+  char name[100], value[100];   // Header
+  char content[100], extra[400];
+  int len, req = 0;
 
   // reset buffers
-  memset(&m, 0, sizeof m); 
-  memset(&r, 0, sizeof r); 
-  memset(&v, 0, sizeof v);
-  memset(&name, 0, sizeof name); 
-  memset(&value, 0, sizeof value); 
-  memset(&ex1, 0, sizeof ex1); memset(&ex2, 0, sizeof ex2); memset(&ex3, 0, sizeof ex3); memset(&ex4, 0, sizeof ex4);
-  memset(&content, 0, sizeof content);
+  memset(m, 0, sizeof m); 
+  memset(r, 0, sizeof r); 
+  memset(v, 0, sizeof v);
+  memset(name, 0, sizeof name); 
+  memset(value, 0, sizeof value); 
+  memset(extra, 0, sizeof extra);
+  memset(content, 0, sizeof content);
 
   // Populate Request Line
-  sscanf(request, "%100s %100s %100s %100s", m, r, v, name);
+  sscanf(request, "%99s %99s %99s %99s", m, r, v, name);
   req = strlen(m) + strlen(r) + strlen(v) + strlen(name) + 5;
   request += req;                        // take request line out of request
 
   // Populate Host Value
   sscanf(request, "%[^\r\n]s", value);   // grab the host value
   request += strlen(value) + 1;          // take out host value from request
-
-  // Get the Content Length 
-  sscanf(request, "%100s %100s %100s %100s %100s %d", ex1, ex2, ex3, ex4, content, &len);
   
-  // Reset request
-  memset(&request,0,sizeof request);
-
   // Check Request
   if (BadRequest(r, v, name, value)) {
-    ServerResponse(connfd, 400, strlen(Status(400)) +1, m);
+    ServerResponse(connfd, 400, 0, m);
     return;
   }
 
@@ -306,13 +300,20 @@ void ParseRequest(char *request, int connfd) {
   }
 
   else if (strncmp(m,"PUT",3) == 0) {
+    // Get the Content Length 
+    sscanf(request, "%99s %99s %99s %99s %99s %d", extra, extra, extra, extra, content, &len);
     int putCode = ParsePut(m, r, len, connfd);
-      ServerResponse(connfd, putCode, strlen(Status(putCode)) +1, m);
+    if (putCode == 201) {
+      ServerResponse(connfd, 201, 8, m);
+    }
+    else {
+      ServerResponse(connfd, 200, 3, m);
+    }
     return;
   }
 
   else {
-    ServerResponse(connfd, 501, strlen(Status(501)) +1, m);
+    ServerResponse(connfd, 501, 0, m);
     return;
   }
 }
@@ -326,8 +327,10 @@ void handle_connection(int connfd) {
   // Server maintains connection
   while(1) {
 
+    memset(request,0,sizeof request);
+
     // Receive new request from client
-    rec = recv(connfd, request, HEADER_SIZE, 0);
+    rec = recv(connfd, request, HEADER_SIZE, 0); // Assume request makes it in one line
     if (rec < 0) { warn("recv"); break; }        // Bad recv from client
     if (rec == 0){ break; }                      // Client exits connection
 
