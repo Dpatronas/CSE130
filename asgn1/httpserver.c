@@ -8,47 +8,46 @@
 #include <fcntl.h>      // open()
 #include <sys/stat.h>   // fstat
 #include <ctype.h>
-
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#define HEADER_SIZE       1024          // 1KiB max header length
+#define HEADER_SIZE       1024
 #define PROCESS_BODY_SIZE 4096
 
 extern int errno;
 
-struct stat st;
+// Methods
+typedef enum method {
+  _GET_ = 0,
+  _PUT_,
+  _HEAD_,
+} method;
+
+struct ClientRequest {
+
+  int socket;           // Client connection fd
+  int method;
+  char resource [300];
+  char hostname [300];  // Host version
+  char hostvalue [300];
+  unsigned int len;     // Length of resource
+
+} ClientRequest;
 
 // status code options
 const char* Status(int code) {
   switch(code) {
-    case 200: return "OK";            // Response is successful ie: nothing else broke
-    case 201: return "Created";       // Successful PUT resource
-    case 400: return "Bad Request";   // Request is not valid ie: not parsable
-    case 403: return "Forbidden";     // Cannot access valid resource file (for GET)
-    case 404: return "File Not Found";     // Valid resource name but server cannot find file
+    case 200: return "OK";                    // Response is successful ie: nothing else broke
+    case 201: return "Created";               // Successful PUT resource
+    case 400: return "Bad Request";           // Request is not valid ie: not parsable
+    case 403: return "Forbidden";             // Cannot access valid resource file (for GET)
+    case 404: return "File Not Found";        // Valid resource name but server cannot find file
     case 500: return "Internal Server Error"; // Request is valid but cannot allocate memory to process request
     case 501: return "Not Implemented";       // Request is valid is ok BUT command not valid
   }
   return NULL;
-}
-
-// Send client response for request
-void ServerResponse(int connfd, int code, int length, char * m) {
-
-  char response[HEADER_SIZE]; int s;
-
-  if (strncmp(m,"PUT",3) == 0) {
-    sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s\n", code, Status(code), length, Status(code));
-    s = send(connfd, response, strlen(response), 0); 
-    if (s < 0) { warn("send()"); }
-    return;
-  }
-  sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", code, Status(code), length);
-  s = send(connfd, response, strlen(response), 0);
-  if (s < 0) { warn("send()"); }
 }
 
 /**
@@ -63,7 +62,6 @@ uint16_t strtouint16(char number[]) {
   }
   return num;
 }
-
 
 /**
    Creates a socket for listening for connections.
@@ -84,167 +82,54 @@ int create_listen_socket(uint16_t port) {
   return listenfd;
 }
 
+// Send client response for request
+void ServerResponse(int code, struct ClientRequest rObj) {
 
-/**
-  Process buffer requests
-  If performing GET: infile is resource file, outfile is socket body
-  If performing PUT: infile is socket body, outfile is resource file
-    m:   command from request
-    len: length of bytes to buffer in / out.
-*/
-void processInput(int infile, int len, int outfile, char * m) {
-  int isDone = 0, tot_read = 0;
+  char response[HEADER_SIZE];
 
-  char* readbuff = (char *)malloc(PROCESS_BODY_SIZE);
-  if(!readbuff) {
-    fprintf(stderr, "Bad malloc!");
-    return;
+  if (rObj.method == _PUT_) {
+    int slen = strlen(Status(code))+1;
+
+    sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s\n", 
+      code, Status(code), slen, Status(code));
+    send(rObj.socket, response, strlen(response), 0); 
   }
+  else { // GET
+    sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", 
+      code, Status(code), rObj.len);
 
-  while(!isDone) {
-    int lastLine = 0;
-    int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
-
-    if(rdCount <= 0) {
-      break;
-    }
-
-    // Buffer contains the last line
-    if(rdCount < PROCESS_BODY_SIZE)
-      lastLine = 1;
-
-    for(int i = 0; i < PROCESS_BODY_SIZE; i++) {
-      tot_read++;
-      // Real all bytes OR at end of last buffer
-      if ((lastLine && i == rdCount) || tot_read == len)  {
-
-        if (strncmp(m,"GET",3) == 0) {
-          send(outfile, readbuff, i + 1, 0);
-        }
-        else { //PUT
-          write(outfile, readbuff, i + 1); //Write contents to outfile
-        }
-        isDone = 1;
-        break;
-      }
-    }
-    // Full buffer
-    if(!isDone) {
-
-      if (strncmp(m,"GET",3) == 0) {
-        send(outfile, readbuff, rdCount, 0);
-      }
-
-      else { //PUT
-        write(outfile, readbuff, rdCount);
-      }
-    }
-  }
-
-  free(readbuff);
-}
-
-
-/**
- * Parses Put Request
- *  Checks whether to create or truncate existing file
-*/
-int ParsePut(char *m, char *r, int len, int connfd) {
-
-  int outfile; int code;
-
-  if (access(r, F_OK) == 0) {
-    code = 200;  // truncate code OK
-  }
-  else {
-    code = 201;  // create code CREATED
-  }
-
-  outfile = open(r, O_RDWR | O_CREAT | O_TRUNC, 0777); // PUT resource file
-  if (outfile < 0) { 
-    warn("creating outfile error"); 
-    return -1; 
-  }
-
-  // empty file contents nothing to process
-  if (len == 0) {
-    return code;
-  }
-
-  processInput(connfd, len, outfile, m); //write recv'd bytes into file resource
-  return code;
-}
-
-
-/**
- * Parses GET or HEAD Request
- *  Checks whether file resources exists and/or is accessible.
-*/
-void ParseGetHead(char *m, char *r, int connfd) {
-
-  int infile; int len;
-
-  // Check errors
-  if ((infile = open(r, O_RDONLY, 0)) < 0) {              // open file
-    warn("cannot open '%s' due to ernno: %d", r, errno);  // bad file open
-
-    if (errno == 2) {                                     // check errno for status code
-      ServerResponse(connfd, 404, 0, m); // DNE
-    }
-    else {
-      ServerResponse(connfd, 403, 0, m); // Forbidden
-    }
-    return;
-  }
-
-  stat(r, &st);
-  len = st.st_size;
-
-  // Otherwise, send response
-  ServerResponse(connfd, 200, len, m);
-
-  if (strncmp(m,"GET",3) == 0) {
-    processInput(infile, len, connfd, m);
+    send(rObj.socket, response, strlen(response), 0);
   }
 }
 
 
 /**
- * Returns 1 if the request is bad
- * r: resource file
- * v: version
- * name: Host 
- * ex value: 10.0.0.5
+ * Returns 1 if request field is bad
 */
-int BadRequest(char *r, char *v, char *name, char *value) {
+int isBadRequest(struct ClientRequest * rObj) {
 
   // Bad Version
-  if (!(strncmp(v,"HTTP/1.1",8) == 0)) {
+  if (!(strncmp(rObj->hostname,"HTTP/1.1",8) == 0)) {
     return 1;
   }
-
-  if (!(strncmp(r, "//", 1) == 0)) {
+  // File name checks
+  if (!(strncmp(rObj->resource, "//", 1) == 0)) {
     return 1;
   }
+  //remove file backslash
+  memmove(rObj->resource, rObj->resource+1, strlen(rObj->resource));  
 
-  memmove(r, r+1, strlen(r)); //remove the backslash from file
-
-  if (strlen(r) > 19) {
+  if (strlen(rObj->resource) > 19) {
     return 1;
   }
-
-  else if (!(strncmp(name,"Host",4) == 0)) {
-    return 1;
-  }
-
-  for (size_t i = 0; i < strlen(value); i++) {
-    if (isspace(value[i])) {
+  for (size_t i = 0; i < strlen(rObj->resource); i++) {
+    if ( !(isalnum(rObj->resource[i])) && (rObj->resource[i] != '_') && (rObj->resource[i] != '.')) {
       return 1;
     }
   }
-
-  for (size_t i = 0; i < strlen(r); i++) {
-    if ( !(isalnum(r[i])) && (r[i] != '_') && (r[i] != '.')) {
+  // Check host value
+  for (size_t i = 0; i < strlen(rObj->hostvalue); i++) {
+    if (isspace(rObj->hostvalue[i])) {
       return 1;
     }
   }
@@ -252,91 +137,269 @@ int BadRequest(char *r, char *v, char *name, char *value) {
 }
 
 
-/**
- * Parse ASCII request fields (space seperated)
- *  m: commands   (GET,PUT,HEAD)
- *  r: resource   (Some file)
- *  v: version    (HTTP/1.1)
-*/
-void ParseRequest(char *request, int connfd) {
-  char m[100], r[100], v[100];  // Request
-  char name[100], value[100];   // Header
-  char content[100], extra[400];
-  int len, req = 0;
+void processBodyPUT(int connfd, unsigned int len, int outfile) {
+  int tot_read = 0;
 
-  // reset buffers
-  memset(m, 0, sizeof m); 
-  memset(r, 0, sizeof r); 
-  memset(v, 0, sizeof v);
-  memset(name, 0, sizeof name); 
-  memset(value, 0, sizeof value); 
-  memset(extra, 0, sizeof extra);
-  memset(content, 0, sizeof content);
+  char* readbuff = (char *)malloc(PROCESS_BODY_SIZE);
+  if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
 
-  // Populate Request Line
-  sscanf(request, "%99s %99s %99s %99s", m, r, v, name);
-  req = strlen(m) + strlen(r) + strlen(v) + strlen(name) + 5;
-  request += req;                        // take request line out of request
+ while(1){
+    int rdCount = read(connfd, readbuff, PROCESS_BODY_SIZE);
+    tot_read += rdCount;
 
-  // Populate Host Value
-  sscanf(request, "%[^\r\n]s", value);   // grab the host value
-  request += strlen(value) + 1;          // take out host value from request
+    write(outfile, readbuff, rdCount);
+
+    if(tot_read >= len) {
+      break;
+    }
+  }
   
+  free(readbuff);
+}
+
+
+void processBodyGET(int infile, unsigned int len, int connfd) {
+  int tot_read = 0;
+
+  char* readbuff = (char *)malloc(PROCESS_BODY_SIZE);
+  if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
+
+ while(1){
+    int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
+    tot_read += rdCount;
+
+    write(connfd, readbuff, rdCount);
+
+    if(tot_read >= len) {
+      break;
+    }
+  }
+  free(readbuff);
+}
+
+
+/**
+ * Parses Put
+ *  Checks whether to create or truncate existing file
+*/
+int ParsePut(struct ClientRequest * rObj) {
+
+  int code = 0; // return value
+
+  if (access(rObj->resource, F_OK) == 0) {
+    code = 200;  // truncate code OK
+  }
+  else {
+    code = 201;  // create code CREATED
+  }
+
+  int outfile = open(rObj->resource, O_RDWR | O_CREAT | O_TRUNC, 0622); // PUT resource file
+  if (outfile < 0) { 
+    warn("creating outfile error"); 
+    return -1; 
+  }
+  
+  // empty file contents nothing to process
+  if (rObj->len == 0) {
+    close(outfile);
+    return code;
+  }
+
+  // write recv'd bytes into file resource
+  processBodyPUT(rObj->socket, rObj->len, outfile);
+  close(outfile);
+  return code;
+}
+
+
+/**
+ * Parses GET or HEAD. 
+ * note: Head does not process bytes.
+ *  Checks whether file resources exists and/or is accessible.
+*/
+void ParseGetHead(struct ClientRequest * rObj) {
+  int infile;
+  // Check errors
+  if ((infile = open(rObj->resource, O_RDONLY, 0)) < 0) {              // open file
+    warn("cannot open '%s' due to ernno: %d", rObj->resource, errno);  // bad file open
+
+    if (errno == 2) {                                     // check errno for status code
+      ServerResponse(404, *rObj); // DNE
+    }
+    else {
+      ServerResponse(403, *rObj); // Forbidden
+    }
+    return;
+  }
+
+  struct stat st;
+  stat(rObj->resource, &st);
+  rObj->len = st.st_size;
+
+  // Otherwise, send OK response
+  ServerResponse(200, *rObj);
+
+  if (rObj->method == _GET_) {
+    processBodyGET(infile, rObj->len, rObj->socket);
+  }
+  close(infile);
+}
+
+
+// Parse lines of header
+void ParseLine(char* input, struct ClientRequest * rObj) {
+  int param_count = 0;
+  int param_type = -1;
+
+  char params[5][HEADER_SIZE];
+  // Lines expected
+  enum {
+    _GET = 0,
+    _PUT,
+    _HEAD,
+    _HOST,
+    _USER_AGENT,
+    _ACCEPT,
+    _CONTENT_LENGTH,
+    _EXPECT,
+
+    PARAM_TOTAL,
+  };
+  const int type_count = PARAM_TOTAL;
+
+  // Map enum to string
+  char* types[PARAM_TOTAL] = {
+    [_GET] =            "GET",
+    [_PUT] =            "PUT",
+    [_HEAD] =           "HEAD",
+    [_HOST] =           "Host:",
+    [_USER_AGENT] =     "User-Agent:",
+    [_ACCEPT] =         "Accept:",
+    [_CONTENT_LENGTH] = "Content-Length:",
+    [_EXPECT] =         "Expect:",
+  };
+  char * tok = NULL;
+
+  tok = strtok (input, " ");
+  while (tok != NULL) 
+  {
+    if (param_count == 0) {
+      for (int i = 0; i < type_count; ++i) {
+        if (strstr(tok, types[i])) {  // search for token in the 
+          param_type = i;
+          break;
+        }
+      }
+    }
+    else {
+      strncpy(params[param_count - 1], tok, HEADER_SIZE);
+    }
+    param_count++;
+    tok = strtok (NULL, " ");
+  }
+
+  if (param_type == -1) {
+    printf("Unknown req/param, ignoring line\n");
+    return;
+  }
+  switch(param_type) {
+    case _GET: {
+      rObj->method = _GET_;
+      strcpy(rObj->resource, params[0]); strcpy(rObj->hostname, params[1]);
+      break;
+    }
+   case _PUT: {
+      rObj->method = _PUT_;
+      strcpy(rObj->resource, params[0]); strcpy(rObj->hostname, params[1]);
+      break;
+   }
+  case _HEAD: {
+      rObj->method = _HEAD_;
+      strcpy(rObj->resource, params[0]); strcpy(rObj->hostname, params[1]);
+      break;
+   }
+   case _HOST: {
+      tok = strtok(params[0], ":");     
+      tok = strtok (NULL, " ");
+      strcpy(rObj->hostvalue, tok);
+      break;
+   }
+   case _USER_AGENT: {
+      break;
+   }
+   case _ACCEPT: {
+      break;
+   }
+   case _CONTENT_LENGTH: {
+      rObj->len = atoi(params[0]);     
+      break;
+   }
+   case _EXPECT: {
+      break;
+   }
+   default: {
+      printf("Unknown param type: %i\n", param_type);
+      break;
+    }
+  }
+}
+
+// Parse header line by line
+void ParseHeader(char * request, struct ClientRequest * rObj) {
+ char * tok = strtok (request, "\r\n");
+ while (tok != NULL)
+ {
+   request += strlen(tok) + strlen("\r\n");
+   ParseLine(tok, rObj);
+   tok = strtok (request, "\r\n");
+ }
+}
+
+
+void ProcessRequest(char *request, int connfd) {
+
+  struct ClientRequest rObj = {0}; //reset object
+  rObj.socket = connfd;
+
+  ParseHeader(request, &rObj);
+
   // Check Request
-  if (BadRequest(r, v, name, value)) {
-    ServerResponse(connfd, 400, 0, m);
+  if (isBadRequest(&rObj)) {
+    ServerResponse(400, rObj);
     return;
   }
 
   // Check commands
-  if (strncmp(m,"GET",3) == 0) {
-    ParseGetHead(m, r, connfd);
+  if ((rObj.method == _GET_) || (rObj.method == _HEAD_)) {
+    ParseGetHead(&rObj);
     return;
   }
 
-  else if (strncmp(m, "HEAD",4) == 0) {
-    ParseGetHead(m, r, connfd);
-    return;
-  }
-
-  else if (strncmp(m,"PUT",3) == 0) {
-    // Get the Content Length 
-    sscanf(request, "%99s %99s %99s %99s %99s %d", extra, extra, extra, extra, content, &len);
-    int putCode = ParsePut(m, r, len, connfd);
-    if (putCode == 201) {
-      ServerResponse(connfd, 201, 8, m);
-    }
-    else {
-      ServerResponse(connfd, 200, 3, m);
-    }
+  else if (rObj.method == _PUT_) {
+    int putCode = ParsePut(&rObj);
+    ServerResponse(putCode, rObj);
     return;
   }
 
   else {
-    ServerResponse(connfd, 501, 0, m);
+    ServerResponse(501, rObj);
     return;
   }
 }
 
 
-void handle_connection(int connfd) {
+void HandleConnection(int connfd) {
 
   char request[HEADER_SIZE];   
-  int rec = 0;
 
-  // Server maintains connection
-  while(1) {
-
+  while(1) 
+  {
     memset(request,0,sizeof request);
-
-    // Receive new request from client
-    rec = recv(connfd, request, HEADER_SIZE, 0); // Assume request makes it in one line
+    int rec = recv(connfd, request, HEADER_SIZE, 0); // Receive new request from client
     if (rec < 0) { warn("recv"); break; }        // Bad recv from client
     if (rec == 0){ break; }                      // Client exits connection
-
-    ParseRequest(request, connfd);
+    ProcessRequest(request, connfd);
   }
-
   close(connfd);
 }
 
@@ -351,10 +414,11 @@ int main(int argc, char *argv[]) {
 
   listenfd = create_listen_socket(port);
 
-  while(1) {
+  while(1) 
+  {
     int connfd = accept(listenfd, NULL, NULL);
     if (connfd < 0) { warn("accept error"); continue; }
-    handle_connection(connfd);
+    HandleConnection(connfd);
   }
   return EXIT_SUCCESS;
 }
