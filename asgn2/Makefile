@@ -1,7 +1,7 @@
 TARGET = httpserver
 
-CC = clang
-CFLAGS = -Wall -Wextra -Werror -Wpedantic -std=c99 -g
+CC = gcc -pthread
+CFLAGS = -Wall -Wextra -Werror -Wpedantic -std=c99 -g 
 
 OBJ:= $(patsubst %.c,%.o,$(wildcard *.c))
 

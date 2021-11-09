@@ -1,7 +1,6 @@
-// Despina Patronas CSE130 Fall 2021
-// multithreaded server
+// Despina Patronas CSE130 Fall 2021 asgn2
 
-// Sources
+// Sources:
 // Hex Conversion: https://www.codezclub.com/c-convert-string-hexadecimal/
 
 #include <stdlib.h>
@@ -15,19 +14,39 @@
 #include <ctype.h>      // isalnum()
 #include <sys/stat.h>   // stat()
 #include <getopt.h>
-
+// multithreading libraries
+#include <pthread.h>
+#include <semaphore.h>
+// network libraries
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include "queue.h"
+
 #define HEADER_SIZE       1024
 #define PROCESS_BODY_SIZE 4096
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
-#define GETOPTIONS "N:l:"  // optional CMD line args. If used, requires arguments
+// #define GETOPTIONS ":N:l:"  // optional CMD line args. If used, requires arguments
 
 static int log_report_fd;
 extern int errno;
+
+typedef struct {
+  int tid;         // the index of thread in thread pool
+  pthread_t * ptr;      // the thread itself
+} threadProcess_t;
+
+static threadProcess_t ** thread_pool;  //ptr to the struct thread pool
+
+enum {
+  THREAD_INITIALZED = 0,
+  THREAD_READY,
+  THREAD_BUSY,
+
+  THREAD_TOT,
+};
 
 // Commands server supports
 typedef enum method {
@@ -99,6 +118,8 @@ int create_listen_socket(uint16_t port) {
 
 // Log request into the report
 void ReportLog(struct ClientRequest * rObj) {
+
+  // wait signal
   char log[PROCESS_BODY_SIZE];
 
   char* types[3] = {  //define string for methods
@@ -185,7 +206,7 @@ int setHex(struct ClientRequest * rObj, char * readbuff) {
   int logbytes = MIN(strlen(readbuff), 1000); //read 1000 or less
 
   int i = 0; int j = 0;
-  for(i,j; i < logbytes; i++, j += 2) {
+  for(; i < logbytes; i++, j += 2) {
     sprintf((char*)rObj->hex + j,"%02X" ,readbuff[i]);  // adds '\0'
   }
 
@@ -198,7 +219,8 @@ int setHex(struct ClientRequest * rObj, char * readbuff) {
 // Process body for PUT and GET requests
 // NOTE: GET sends response before PUT
 void processBody(int infile, unsigned int len, int outfile, struct ClientRequest * rObj) {
-  int tot_read = 0; int gotLogHex = 0;
+  unsigned int tot_read = 0;
+  int gotLogHex = 0;
 
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
   if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
@@ -208,7 +230,7 @@ void processBody(int infile, unsigned int len, int outfile, struct ClientRequest
     int remainingBytes = len - tot_read;
     int RDSIZE = MIN(PROCESS_BODY_SIZE, remainingBytes);  // dont read over required length
 
-    int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
+    int rdCount = read(infile, readbuff, RDSIZE);
     tot_read += rdCount;
 
     write(outfile, readbuff, rdCount);
@@ -230,7 +252,6 @@ void processBody(int infile, unsigned int len, int outfile, struct ClientRequest
   }
 
   free(readbuff);
-  readbuff = NULL;
 }
 
 
@@ -316,7 +337,7 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
   int param_count = 0;
   int param_type = -1;
 
-  char params[5][HEADER_SIZE];
+  char params[20][HEADER_SIZE];
   // Lines expected
   enum {
     _GET = 0, _PUT, _HEAD, _HOST, _USER_AGENT, _ACCEPT, _CONTENT_LENGTH, _EXPECT,
@@ -358,8 +379,7 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
 
   // Unexpected line
   if (param_type == -1) {
-    fprintf(stderr, "Unknown req/param, ignoring line\n");
-    return -1;
+    // fprintf(stderr, "Unknown req/param, ignoring line\n" );
   }
 
   switch(param_type) {
@@ -406,7 +426,7 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
    case _EXPECT: { break; }
 
    default: {
-      fprintf(stderr, "Unknown param type: %i\n", param_type);
+      // fprintf(stderr, "Unknown param type: %i\n", param_type);
       break;
     }
   }
@@ -422,6 +442,7 @@ int ParseHeader(char * request, struct ClientRequest * rObj) {
  while (tok != NULL)
  {
    request += strlen(tok) + strlen("\r\n"); // manually set index
+   // printf("[DBG] Line: %s \n", tok);
    int parse_status = ParseLine(tok, rObj);      // return status of parseLine
    if (parse_status < 0) {
       return -1;
@@ -438,6 +459,8 @@ int ParseHeader(char * request, struct ClientRequest * rObj) {
 //    - check bad request line fields are satisfactory
 //    - attempt to fulfill request HEAD, GET, PUT
 void ProcessRequest(char *request, int connfd) {
+
+  // printf("[DBG] %s\n", request);
 
   struct ClientRequest rObj = {0}; //reset object
   rObj.socket = connfd;
@@ -490,52 +513,111 @@ void HandleConnection(int connfd) {
 
 
 
+// Listens for client connections dispatches jobs for worker threads
+void * listenerThreadWorkLoop (void * arg) {
+  uint16_t port = *(uint16_t *)arg;
+  int listenfd = create_listen_socket(port);
+
+  while(1) 
+  {
+    int connfd = accept(listenfd, NULL, NULL);
+    if (connfd < 0) { warn("accept error"); continue; }
+    printf("\n [!] Accepted connection %d, pushing to queue\n", connfd);
+    queue_push(connfd);
+  }
+}
+
+
+
+
+// worker thread takes in thread 
+void * workerThread(void * arg) {
+  threadProcess_t* ctx = (threadProcess_t*)arg;
+
+  printf("Worker %i started\n", ctx->tid);
+
+  while (1)
+  {
+    int connfd_job = queue_pop();
+    if (connfd_job != -1)
+    {
+      printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
+      HandleConnection(connfd_job);
+      // printf("[Worker %d] JOB DONE \n", ctx->tid);
+    }
+  }
+
+  return NULL;
+}
+
+
+
+
 // Grab clients
 int main(int argc, char *argv[]) {
-  int listenfd = 0; uint16_t port = 0; int opt = 0;
+
+  uint16_t port; 
+  int opt;
   log_report_fd = 0;   // default logfile DNE
   int threads = 5;     // default threads
 
   // Check port number exists && valid
   if (argc < 2) { errx(EXIT_FAILURE, "A port number is required!"); }
-  port = strtouint16(argv[1]);
-  if (port <= 0) { errx(EXIT_FAILURE, "invalid port number: %s", argv[1]); }
 
   // Get opts
-  while ((opt = getopt(argc, argv, GETOPTIONS)) != -1 )
+  while (optind < argc)
   {
-    switch (opt) {
-
-      case 'N': // Number of threads specified
-        threads = atoi(optarg);
-        break;
-      
-      case 'l': // Create initial logfile
-        printf(" %s", optarg);
-        log_report_fd = open(optarg, O_RDWR | O_CREAT | O_TRUNC, 0644);
-        break;
-
-      case ':': // Parameters not given for optional argument
-        errx(EXIT_FAILURE,"Value not specified for option %c", optopt);
-        break;
-
-      case '?':
-        errx(EXIT_FAILURE,"Option is not supported %c", optopt);
-        break;
-    }   
-  }
-  if (threads == 0) { // case -N -l both have no options
-    errx(EXIT_FAILURE,"Value not specified for options");
+    if ((opt = getopt(argc, argv, ":N:l:")) != -1 ) {
+      switch (opt) 
+      {
+        case 'N':
+          threads = atoi(optarg);
+          break;
+        
+        case 'l':
+          log_report_fd = open(optarg, O_RDWR | O_CREAT | O_TRUNC, 0644);
+          break;
+          
+      }
+    }
+    else {
+      port = strtouint16(argv[optind]);
+      if (port <= 0) { errx(EXIT_FAILURE, "invalid port number: %s", argv[1]); } 
+      optind++;
+    }
   }
 
-  listenfd = create_listen_socket(port);
+  // printf ("\n\n threadflag = %d, logflag = %d, port = %d \n", threads, log_report_fd, port);
 
-  // start accepting Clients
-  while(1) 
-  {
-    int connfd = accept(listenfd, NULL, NULL);
-    if (connfd < 0) { warn("accept error"); continue; }
-    HandleConnection(connfd);
+  // Initialize queue
+  queue_init();
+
+  // Allocate thread pool
+  thread_pool = (threadProcess_t **)malloc(sizeof(threadProcess_t*) * threads);
+
+  // Start workers..
+  for (int i = 0; i < threads; i++) {
+    thread_pool[i] = (threadProcess_t *)malloc(sizeof(threadProcess_t));  // array of structs
+
+    thread_pool[i]->tid   = i;
+    thread_pool[i]->ptr        = (pthread_t *) malloc (sizeof(pthread_t));
+    pthread_create( thread_pool[i]->ptr, NULL, &workerThread, (void*)thread_pool[i]);
   }
+
+  // Start listener thread
+  pthread_t listenerThread;
+  pthread_create(&listenerThread, NULL, &listenerThreadWorkLoop, (void*)&port);
+
+  // Release thread pool
+  for (int i = 0; i < threads; i++) {
+    pthread_join(*thread_pool[i]->ptr, NULL); // Threads finish work
+    free(thread_pool[i]->ptr);
+    free(thread_pool[i]);
+
+  }
+  free(thread_pool);
+
+  pthread_join(listenerThread, NULL);
+
   return EXIT_SUCCESS;
 }
