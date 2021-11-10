@@ -203,11 +203,17 @@ int isBadRequest(struct ClientRequest * rObj) {
 // Put the hex represenation into PUT / GET message
 int setHex(struct ClientRequest * rObj, char * readbuff) {
 
-  int logbytes = MIN(strlen(readbuff), 1000); //read 1000 or less
+  unsigned int logbytes = MIN(strlen(readbuff), 1000); //read 1000 or less
 
-  int i = 0; int j = 0;
+  unsigned int i = 0; 
+  unsigned int j = 0;
+
   for(; i < logbytes; i++, j += 2) {
     sprintf((char*)rObj->hex + j,"%02X" ,readbuff[i]);  // adds '\0'
+  }
+
+  for (i = 0; i < strlen(rObj->hex); i++) {
+    rObj->hex[i] = tolower(rObj->hex[i]);
   }
 
   rObj->hex[logbytes*2+1]='\0'; //adding NULL in the end
@@ -374,7 +380,8 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
       strncpy(params[param_count - 1], tok, HEADER_SIZE);
     }
     param_count++;
-    tok = strtok (NULL, " ");
+    line += strlen(tok) + strlen(" "); // manually set index 
+    tok = strtok (line, " ");
   }
 
   // Unexpected line
@@ -504,8 +511,8 @@ void HandleConnection(int connfd) {
   {
     memset(request,0,sizeof request);
     int rec = recv(connfd, request, HEADER_SIZE, 0); // Receive new request from client
-    if (rec < 0) { warn("recv"); break; }        // Bad recv from client
-    if (rec == 0){ break; }                      // Client exits connection
+    if (rec < 0) { warn("recv"); break; }            // Bad recv from client
+    if (rec == 0){ break; }                          // Client exits connection
     ProcessRequest(request, connfd);
   }
   close(connfd);
@@ -575,9 +582,8 @@ int main(int argc, char *argv[]) {
           break;
         
         case 'l':
-          log_report_fd = open(optarg, O_RDWR | O_CREAT | O_TRUNC, 0644);
+          log_report_fd = open(optarg, O_RDWR | O_CREAT | O_APPEND, 0644);
           break;
-          
       }
     }
     else {
@@ -587,7 +593,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // printf ("\n\n threadflag = %d, logflag = %d, port = %d \n", threads, log_report_fd, port);
+  printf ("threads = %d, log = %d, port = %d \n", threads, log_report_fd, port);
 
   // Initialize queue
   queue_init();
@@ -600,7 +606,7 @@ int main(int argc, char *argv[]) {
     thread_pool[i] = (threadProcess_t *)malloc(sizeof(threadProcess_t));  // array of structs
 
     thread_pool[i]->tid   = i;
-    thread_pool[i]->ptr        = (pthread_t *) malloc (sizeof(pthread_t));
+    thread_pool[i]->ptr   = (pthread_t *) malloc (sizeof(pthread_t));
     pthread_create( thread_pool[i]->ptr, NULL, &workerThread, (void*)thread_pool[i]);
   }
 
@@ -613,10 +619,9 @@ int main(int argc, char *argv[]) {
     pthread_join(*thread_pool[i]->ptr, NULL); // Threads finish work
     free(thread_pool[i]->ptr);
     free(thread_pool[i]);
-
   }
-  free(thread_pool);
 
+  free(thread_pool);
   pthread_join(listenerThread, NULL);
 
   return EXIT_SUCCESS;
