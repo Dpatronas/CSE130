@@ -363,11 +363,13 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
     [_CONTENT_LENGTH] = "Content-Length:",
     [_EXPECT] =         "Expect:",
   };
-  char * tok = NULL;
 
+  char * tok = NULL;
   tok = strtok (line, " ");
+  
   while (tok != NULL) 
   {
+    // printf("\n[DBG] %s", tok);
     if (param_count == 0) {
       for (int i = 0; i < type_count; ++i) {
         if (strstr(tok, types[i])) {
@@ -380,8 +382,7 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
       strncpy(params[param_count - 1], tok, HEADER_SIZE);
     }
     param_count++;
-    line += strlen(tok) + strlen(" "); // manually set index 
-    tok = strtok (line, " ");
+    tok = strtok (NULL, " ");
   }
 
   // Unexpected line
