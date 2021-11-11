@@ -13,6 +13,7 @@
 #include <unistd.h>     // close(), write()
 #include <ctype.h>      // isalnum()
 #include <sys/stat.h>   // stat()
+#include <sys/file.h>   // flock()
 #include <getopt.h>
 // multithreading libraries
 #include <pthread.h>
@@ -28,17 +29,21 @@
 #define HEADER_SIZE       1024
 #define PROCESS_BODY_SIZE 4096
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
-// #define GETOPTIONS ":N:l:"  // optional CMD line args. If used, requires arguments
+#define GETOPTIONS "N:l:"  // optional CMD line args. If used, requires arguments
+
+pthread_mutex_t lock_file = PTHREAD_MUTEX_INITIALIZER; //lock the flock
 
 static int log_report_fd;
+static int failed_jobs;
+
 extern int errno;
 
 typedef struct {
-  int tid;         // the index of thread in thread pool
-  pthread_t * ptr;      // the thread itself
+  int tid;         // index of thread in thread pool
+  pthread_t * ptr; // thread itself
 } threadProcess_t;
 
-static threadProcess_t ** thread_pool;  //ptr to the struct thread pool
+static threadProcess_t ** thread_pool;  // ptr to struct thread pool
 
 enum {
   THREAD_INITIALZED = 0,
@@ -59,13 +64,14 @@ typedef enum method {
 struct ClientRequest {
   int socket;           // Client connection fd
   int method;
-  char resource [300];  // filename
-  char version [300];   // HTTP/1.1
-  char hostname [300];  // localhost
-  char hostvalue [300]; // 8080
-  unsigned int len;     // Length of resource
+  char resource [300];  // ex: /cse130
+  char version [300];   // ex: HTTP/1.1
+  char hostname [300];  // ex: localhost
+  char hostvalue [300]; // ex: 8080
+  unsigned int len;     // Length of resource contents
+
+  int status_code;      // Code for logging
   char hex [2001];      // If logging, contains <= 1000 bytes from processing
-  int logLen;           // If logging, keep track of length of log response.
 
 } ClientRequest;
 
@@ -122,28 +128,33 @@ void ReportLog(struct ClientRequest * rObj) {
   // wait signal
   char log[PROCESS_BODY_SIZE];
 
-  char* types[3] = {  //define string for methods
-    types[_GET_] =  "GET",
-    types[_PUT_] =  "PUT",
-    types[_HEAD_] = "HEAD",
+  //define string for methods
+  char* types[3] = {  
+    types[_GET_] =  "GET", types[_PUT_] =  "PUT", types[_HEAD_] = "HEAD",
   };
+
+  // FAIL
+  if ((rObj->status_code != 200) && (rObj->status_code != 201)) {
+    sprintf(log, "FAIL\t%s /%s %s\t404\n", types[rObj->method], rObj->resource, rObj->version);
+    write(log_report_fd, log, strlen(log));
+    failed_jobs++;
+    return;
+  }
 
   if (rObj->method == _GET_|| rObj->method == _PUT_) {
     // Show hexa representation of first 1k bytes processed...
     sprintf(log, "%s\t/%s\t%s:%s\t%d\t%s\n", 
       types[rObj->method], rObj->resource, rObj->hostname, rObj->hostvalue, rObj->len, rObj->hex);
-    
-    rObj->logLen = strlen(log);
-    write(log_report_fd, log, strlen(log));
   }
+
   // HEAD
-  else {
+  else if (rObj->method == _HEAD_) {
     sprintf(log, "%s\t/%s\t%s:%s\t%d\n", 
       types[rObj->method], rObj->resource, rObj->hostname, rObj->hostvalue, rObj->len);
-  
-    rObj->logLen = strlen(log);
-    write(log_report_fd, log, strlen(log));  
   }
+
+  write(log_report_fd, log, strlen(log));
+
 }
 
 
@@ -251,6 +262,7 @@ void processBody(int infile, unsigned int len, int outfile, struct ClientRequest
       break;
     }
   }
+  pthread_mutex_unlock(&lock_file);
 
   // Active log, log GET / PUT
   if (log_report_fd > 0) {
@@ -268,16 +280,25 @@ int ParsePut(struct ClientRequest * rObj) {
 
   int code = 0;
   if (access(rObj->resource, F_OK) == 0)
-    code = 200;  // truncate code OK
+    rObj->status_code = code = 200;  // truncate code OK
 
   else
-    code = 201;  // create code CREATED
+    rObj->status_code = code = 201;  // create code CREATED
 
   int outfile = open(rObj->resource, O_RDWR | O_CREAT | O_TRUNC, 0622); 
   if (outfile < 0) { 
     warn("creating outfile error"); 
+    rObj->status_code = 500;
+
+    if (log_report_fd > 0) {
+      ReportLog(rObj);
+    }
     return 500; // making resource failed.. error occured..
   }
+
+  // lock the resource file
+  pthread_mutex_lock(&lock_file);
+  flock(outfile, LOCK_EX);
   
   // Empty header body -> nothing to process
   if (rObj->len == 0) {
@@ -303,19 +324,30 @@ void ParseGetHead(struct ClientRequest * rObj) {
     warn("cannot open '%s' due to ernno: %d", rObj->resource, errno);
 
     if (errno == 2) {
+      rObj->status_code = 404;
       ServerResponse(404, *rObj); // DNE
     }
     else {
+      rObj->status_code = 403;
       ServerResponse(403, *rObj); // Forbidden
+    }
+    // Log is active LOG failure
+    if (log_report_fd > 0) {
+      ReportLog(rObj);
     }
     return;
   }
+
+  // lock the resource file
+  pthread_mutex_lock(&lock_file);
+  flock(infile, LOCK_EX);
 
   struct stat st;
   stat(rObj->resource, &st);
   rObj->len = st.st_size;
 
   // Otherwise, send OK response
+  rObj->status_code = 200;
   ServerResponse(200, *rObj);
 
   // Process GET
@@ -339,7 +371,7 @@ void ParseGetHead(struct ClientRequest * rObj) {
 //    - Populate the message object fields
 //    - returns -1 if header fields not accepted.
 //    - ignored extraneous lines..
-int ParseLine(char* line, struct ClientRequest * rObj) {
+int ParseLine(char * line, struct ClientRequest * rObj) {
   int param_count = 0;
   int param_type = -1;
 
@@ -365,11 +397,11 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
   };
 
   char * tok = NULL;
-  tok = strtok (line, " ");
-  
+  tok = strtok (line, " "); // gets first parameter of line
+
   while (tok != NULL) 
   {
-    // printf("\n[DBG] %s", tok);
+    // printf("[DBG] %s \n", tok);
     if (param_count == 0) {
       for (int i = 0; i < type_count; ++i) {
         if (strstr(tok, types[i])) {
@@ -381,6 +413,7 @@ int ParseLine(char* line, struct ClientRequest * rObj) {
     else {
       strncpy(params[param_count - 1], tok, HEADER_SIZE);
     }
+
     param_count++;
     tok = strtok (NULL, " ");
   }
@@ -472,15 +505,12 @@ void ProcessRequest(char *request, int connfd) {
 
   struct ClientRequest rObj = {0}; //reset object
   rObj.socket = connfd;
+  rObj.status_code = 000;
 
   int parse_status = ParseHeader(request, &rObj);
-  if (parse_status < 0) {
-    ServerResponse(400, rObj);
-    return;
-  }
 
-  // Check request fields satisfy requirements
-  if (isBadRequest(&rObj)) {
+  if (parse_status < 0 || isBadRequest(&rObj)) {
+    rObj.status_code = 400;
     ServerResponse(400, rObj);
     return;
   }
@@ -498,10 +528,67 @@ void ProcessRequest(char *request, int connfd) {
   }
 
   else {
+    rObj.status_code = 501;
     ServerResponse(501, rObj);
     return;
   }
 }
+
+
+
+int validateLog(int logfd, char * log_name) {
+  int log_len = 0;
+  int tabs = 0;
+  int tot_log_read = 0;
+
+  struct stat st;
+  stat(log_name, &st);
+  log_len = st.st_size;
+  if (log_len == 0) {
+    return 1;
+  }
+
+  char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
+  if(!readbuff) { fprintf(stderr, "Bad malloc!"); return -1; }
+
+  do 
+  {
+    int rdCount = read(logfd, readbuff, PROCESS_BODY_SIZE);
+    tot_log_read += rdCount;
+  }
+  while(tot_log_read < log_len);
+
+  // validate log
+  for (unsigned int i = 0; i < strlen(readbuff); i++) {
+    if (readbuff[i] == '\t') {
+      tabs++;
+    }
+    if (readbuff[i] == '\n') {
+      if (tabs < 2 || tabs > 4) {
+        return -1;
+      }
+    }
+    tabs = 0;
+  }
+  return 1;
+  free(readbuff);
+}
+
+
+
+// // Listens for client connections dispatches jobs for worker threads
+// void * listenerThreadWorkLoop (void * arg) {
+//   uint16_t port = *(uint16_t *)arg;
+//   int listenfd = create_listen_socket(port);
+
+//   while(1) 
+//   {
+//     int connfd = accept(listenfd, NULL, NULL);
+//     if (connfd < 0) { warn("accept error"); continue; }
+//     printf("\n [!] Accepted connection %d, pushing to queue\n", connfd);
+//     queue_push(connfd);
+//   }
+// }
 
 
 
@@ -521,23 +608,6 @@ void HandleConnection(int connfd) {
 
 
 
-// Listens for client connections dispatches jobs for worker threads
-void * listenerThreadWorkLoop (void * arg) {
-  uint16_t port = *(uint16_t *)arg;
-  int listenfd = create_listen_socket(port);
-
-  while(1) 
-  {
-    int connfd = accept(listenfd, NULL, NULL);
-    if (connfd < 0) { warn("accept error"); continue; }
-    printf("\n [!] Accepted connection %d, pushing to queue\n", connfd);
-    queue_push(connfd);
-  }
-}
-
-
-
-
 // worker thread takes in thread 
 void * workerThread(void * arg) {
   threadProcess_t* ctx = (threadProcess_t*)arg;
@@ -551,7 +621,7 @@ void * workerThread(void * arg) {
     {
       printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
-      // printf("[Worker %d] JOB DONE \n", ctx->tid);
+      printf("[Worker %d] JOB DONE \n", ctx->tid);
     }
   }
 
@@ -575,7 +645,7 @@ int main(int argc, char *argv[]) {
   // Get opts
   while (optind < argc)
   {
-    if ((opt = getopt(argc, argv, ":N:l:")) != -1 ) {
+    if ((opt = getopt(argc, argv, GETOPTIONS)) != -1 ) {
       switch (opt) 
       {
         case 'N':
@@ -584,6 +654,10 @@ int main(int argc, char *argv[]) {
         
         case 'l':
           log_report_fd = open(optarg, O_RDWR | O_CREAT | O_APPEND, 0644);
+          // exit if logfile is bad
+          if (!validateLog(log_report_fd, optarg)) {
+            errx(EXIT_FAILURE, "bad log!: %s", argv[1]); } 
+
           break;
       }
     }
@@ -594,7 +668,7 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  printf ("threads = %d, log = %d, port = %d \n", threads, log_report_fd, port);
+  // printf ("threads = %d, log = %d, port = %d \n", threads, log_report_fd, port);
 
   // Initialize queue
   queue_init();
@@ -612,8 +686,18 @@ int main(int argc, char *argv[]) {
   }
 
   // Start listener thread
-  pthread_t listenerThread;
-  pthread_create(&listenerThread, NULL, &listenerThreadWorkLoop, (void*)&port);
+  // pthread_t listenerThread;
+  // pthread_create(&listenerThread, NULL, &listenerThreadWorkLoop, (void*)&port);
+  
+  int listenfd = create_listen_socket(port);
+
+  while(1) 
+  {
+    int connfd = accept(listenfd, NULL, NULL);
+    if (connfd < 0) { warn("accept error"); continue; }
+    // printf("\n [!] Accepted connection %d, pushing to queue\n", connfd);
+    queue_push(connfd);
+  }
 
   // Release thread pool
   for (int i = 0; i < threads; i++) {
@@ -623,7 +707,7 @@ int main(int argc, char *argv[]) {
   }
 
   free(thread_pool);
-  pthread_join(listenerThread, NULL);
+  // pthread_join(listenerThread, NULL);
 
   return EXIT_SUCCESS;
 }
