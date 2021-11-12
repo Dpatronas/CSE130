@@ -31,10 +31,11 @@
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define GETOPTIONS "N:l:"  // optional CMD line args. If used, requires arguments
 
-pthread_mutex_t lock_file = PTHREAD_MUTEX_INITIALIZER; //lock the flock
+// pthread_mutex_t lock_file = PTHREAD_MUTEX_INITIALIZER; //lock the flock
 
 static int log_report_fd;
-static int failed_jobs;
+static int log_failed_jobs;
+static int log_entries;
 
 extern int errno;
 
@@ -122,6 +123,28 @@ int create_listen_socket(uint16_t port) {
 
 
 
+// Put the hex represenation into PUT / GET message
+int setHex(struct ClientRequest * rObj, char * readbuff) {
+
+  unsigned int logbytes = MIN(strlen(readbuff), 1000); //read 1000 or less
+
+  unsigned int i = 0; 
+  unsigned int j = 0;
+
+  for(; i < logbytes; i++, j += 2) {
+    sprintf((char*)rObj->hex + j,"%02X" ,readbuff[i]);  // adds '\0'
+  }
+
+  for (i = 0; i < strlen(rObj->hex); i++) {
+    rObj->hex[i] = tolower(rObj->hex[i]);
+  }
+
+  rObj->hex[logbytes*2+1]='\0'; //adding NULL in the end
+  return 1;
+}
+
+
+
 // Log request into the report
 void ReportLog(struct ClientRequest * rObj) {
 
@@ -133,26 +156,30 @@ void ReportLog(struct ClientRequest * rObj) {
     types[_GET_] =  "GET", types[_PUT_] =  "PUT", types[_HEAD_] = "HEAD",
   };
 
-  // FAIL
+  // FAIL REPORT
   if ((rObj->status_code != 200) && (rObj->status_code != 201)) {
-    sprintf(log, "FAIL\t%s /%s %s\t404\n", types[rObj->method], rObj->resource, rObj->version);
+    sprintf(log, "FAIL\t%s /%s %s\t%d\n", 
+      types[rObj->method], rObj->resource, rObj->version, rObj->status_code);
     write(log_report_fd, log, strlen(log));
-    failed_jobs++;
+    log_failed_jobs++;
+    log_entries++;
     return;
   }
 
+  // GET / PUT REPORT
   if (rObj->method == _GET_|| rObj->method == _PUT_) {
     // Show hexa representation of first 1k bytes processed...
     sprintf(log, "%s\t/%s\t%s:%s\t%d\t%s\n", 
       types[rObj->method], rObj->resource, rObj->hostname, rObj->hostvalue, rObj->len, rObj->hex);
   }
 
-  // HEAD
+  // HEAD REPORT
   else if (rObj->method == _HEAD_) {
     sprintf(log, "%s\t/%s\t%s:%s\t%d\n", 
       types[rObj->method], rObj->resource, rObj->hostname, rObj->hostvalue, rObj->len);
   }
 
+  log_entries++;
   write(log_report_fd, log, strlen(log));
 
 }
@@ -163,20 +190,55 @@ void ReportLog(struct ClientRequest * rObj) {
 void ServerResponse(int code, struct ClientRequest rObj) {
 
   char response[HEADER_SIZE];
+  int slen;
 
   if (rObj.method == _PUT_) {
-    int slen = strlen(Status(code))+1;
+    slen = strlen(Status(code))+1;
 
     sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s\n", 
       code, Status(code), slen, Status(code));
     send(rObj.socket, response, strlen(response), 0);
   }
 
-  else { // GET
-    sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", 
-      code, Status(code), rObj.len);
+  // GET / HEAD RESPONSE
+  else { 
+    // Valid GET Healthcheck Response
+    if ( (log_report_fd > 0) && 
+         (strncmp(rObj.resource, "healthcheck", 11) == 0) &&
+         (code == 200) )
+    {
+      char health[HEADER_SIZE];
+      sprintf(health, "%d\n%d\n", log_failed_jobs, log_entries);
 
-    send(rObj.socket, response, strlen(response), 0);
+      slen = strlen(health);
+      rObj.len = slen;
+
+      // set hex
+      setHex(&rObj, (char *) &health);
+
+      // send reponse and body
+      sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s", 
+        code, Status(code), slen, health);
+
+      send(rObj.socket, response, strlen(response), 0);
+
+      // report
+      ReportLog(&rObj);
+    }
+
+    else {
+      // Regular GET / HEAD response
+      if (code == 200) {
+        slen = rObj.len;
+      }
+      else {
+        slen = strlen(Status(code))+1;
+      }
+      sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n", 
+        code, Status(code), rObj.len);
+
+      send(rObj.socket, response, strlen(response), 0);
+    }
   }
 }
 
@@ -211,27 +273,6 @@ int isBadRequest(struct ClientRequest * rObj) {
 
 
 
-// Put the hex represenation into PUT / GET message
-int setHex(struct ClientRequest * rObj, char * readbuff) {
-
-  unsigned int logbytes = MIN(strlen(readbuff), 1000); //read 1000 or less
-
-  unsigned int i = 0; 
-  unsigned int j = 0;
-
-  for(; i < logbytes; i++, j += 2) {
-    sprintf((char*)rObj->hex + j,"%02X" ,readbuff[i]);  // adds '\0'
-  }
-
-  for (i = 0; i < strlen(rObj->hex); i++) {
-    rObj->hex[i] = tolower(rObj->hex[i]);
-  }
-
-  rObj->hex[logbytes*2+1]='\0'; //adding NULL in the end
-  return 1;
-}
-
-
 
 // Process body for PUT and GET requests
 // NOTE: GET sends response before PUT
@@ -262,7 +303,8 @@ void processBody(int infile, unsigned int len, int outfile, struct ClientRequest
       break;
     }
   }
-  pthread_mutex_unlock(&lock_file);
+
+  // pthread_mutex_unlock(&lock_file);
 
   // Active log, log GET / PUT
   if (log_report_fd > 0) {
@@ -274,11 +316,43 @@ void processBody(int infile, unsigned int len, int outfile, struct ClientRequest
 
 
 
+void HealthCheck(struct ClientRequest * rObj) {
+  // GET healthceck
+  if (rObj->method == _GET_) {
+    if (log_report_fd > 0) {    // log
+      rObj->status_code = 200;
+      ServerResponse(200, *rObj);
+      return;
+    }
+    rObj->status_code = 404;     //no log
+    ServerResponse(404, *rObj);  
+  }
+
+  // HEAD or PUT healthcheck
+  else { 
+    rObj->status_code = 403;
+    ServerResponse(403, *rObj);
+  }
+
+  // Log healthcheck failure
+  if (log_report_fd > 0) {
+    ReportLog(rObj);
+  } 
+}
+
+
+
 // Parses Put request pre operation
 //    - Checks whether to create or truncate file requested
 int ParsePut(struct ClientRequest * rObj) {
-
   int code = 0;
+
+  // Health check = no processing
+  if (strncmp(rObj->resource, "healthcheck", 11) == 0) {
+    HealthCheck(rObj);
+    return -1;
+  }
+
   if (access(rObj->resource, F_OK) == 0)
     rObj->status_code = code = 200;  // truncate code OK
 
@@ -296,9 +370,9 @@ int ParsePut(struct ClientRequest * rObj) {
     return 500; // making resource failed.. error occured..
   }
 
-  // lock the resource file
-  pthread_mutex_lock(&lock_file);
-  flock(outfile, LOCK_EX);
+  // // lock the resource file
+  // pthread_mutex_lock(&lock_file);
+  // flock(outfile, LOCK_EX);
   
   // Empty header body -> nothing to process
   if (rObj->len == 0) {
@@ -308,7 +382,8 @@ int ParsePut(struct ClientRequest * rObj) {
 
   // Write bytes from socket body into file resource
   processBody(rObj->socket, rObj->len, outfile, rObj);
-  close(outfile);
+
+  close(outfile); //unlocks flock
   return code;
 }
 
@@ -319,6 +394,13 @@ int ParsePut(struct ClientRequest * rObj) {
 //    - GET  checks whether file resources exists and/or is accessible.
 void ParseGetHead(struct ClientRequest * rObj) {
   int infile;
+
+  // Health check = no processing
+  if (strncmp(rObj->resource, "healthcheck", 11) == 0) {
+    HealthCheck(rObj);
+    return;
+  }
+
   // Attempt to open file requested
   if ((infile = open(rObj->resource, O_RDONLY, 0)) < 0) {
     warn("cannot open '%s' due to ernno: %d", rObj->resource, errno);
@@ -338,15 +420,15 @@ void ParseGetHead(struct ClientRequest * rObj) {
     return;
   }
 
-  // lock the resource file
-  pthread_mutex_lock(&lock_file);
-  flock(infile, LOCK_EX);
+  // // lock the resource file
+  // pthread_mutex_lock(&lock_file);
+  // flock(infile, LOCK_EX);
 
   struct stat st;
   stat(rObj->resource, &st);
   rObj->len = st.st_size;
 
-  // Otherwise, send OK response
+  // Otherwise, send OK response HEAD / GET
   rObj->status_code = 200;
   ServerResponse(200, *rObj);
 
@@ -356,13 +438,13 @@ void ParseGetHead(struct ClientRequest * rObj) {
   }
 
   else {
-    // Log is active LOG HEAD
+    // Log process
     if (log_report_fd > 0) {
       ReportLog(rObj);
     }
   }
 
-  close(infile);
+  close(infile); //unlocks
 }
 
 
@@ -523,7 +605,9 @@ void ProcessRequest(char *request, int connfd) {
 
   else if (rObj.method == _PUT_) {
     int putCode = ParsePut(&rObj);
-    ServerResponse(putCode, rObj);
+    if (putCode != -1) {
+      ServerResponse(putCode, rObj);
+    }
     return;
   }
 
@@ -536,7 +620,7 @@ void ProcessRequest(char *request, int connfd) {
 
 
 
-int validateLog(int logfd, char * log_name) {
+int ValidateLog(int logfd, char * log_name) {
   int log_len = 0;
   int tabs = 0;
   int tot_log_read = 0;
@@ -544,6 +628,7 @@ int validateLog(int logfd, char * log_name) {
   struct stat st;
   stat(log_name, &st);
   log_len = st.st_size;
+
   if (log_len == 0) {
     return 1;
   }
@@ -555,21 +640,31 @@ int validateLog(int logfd, char * log_name) {
   {
     int rdCount = read(logfd, readbuff, PROCESS_BODY_SIZE);
     tot_log_read += rdCount;
-  }
-  while(tot_log_read < log_len);
 
-  // validate log
-  for (unsigned int i = 0; i < strlen(readbuff); i++) {
-    if (readbuff[i] == '\t') {
-      tabs++;
-    }
-    if (readbuff[i] == '\n') {
-      if (tabs < 2 || tabs > 4) {
-        return -1;
+
+    // validate log
+    for (int i = 0; i < rdCount; i++) {
+      // printf("%c", readbuff[i]);
+
+      if (readbuff[i] == '\t') {
+        tabs++;
+      }
+      if (readbuff[i] == '\n') {
+        log_entries++;
+
+        if (tabs == 2) {
+          log_failed_jobs++;
+        }
+
+        if (tabs < 2 || tabs > 4) {
+          return 0;
+        }
+        tabs = 0;
       }
     }
-    tabs = 0;
-  }
+
+  } while(tot_log_read < log_len);
+
   return 1;
   free(readbuff);
 }
@@ -608,10 +703,9 @@ void HandleConnection(int connfd) {
 
 
 
-// worker thread takes in thread 
+// worker thread takes in thread id
 void * workerThread(void * arg) {
   threadProcess_t* ctx = (threadProcess_t*)arg;
-
   printf("Worker %i started\n", ctx->tid);
 
   while (1)
@@ -619,9 +713,9 @@ void * workerThread(void * arg) {
     int connfd_job = queue_pop();
     if (connfd_job != -1)
     {
-      printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
+      // printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
-      printf("[Worker %d] JOB DONE \n", ctx->tid);
+      // printf("[Worker %d] JOB DONE \n", ctx->tid);
     }
   }
 
@@ -655,8 +749,10 @@ int main(int argc, char *argv[]) {
         case 'l':
           log_report_fd = open(optarg, O_RDWR | O_CREAT | O_APPEND, 0644);
           // exit if logfile is bad
-          if (!validateLog(log_report_fd, optarg)) {
-            errx(EXIT_FAILURE, "bad log!: %s", argv[1]); } 
+          if (!ValidateLog(log_report_fd, optarg)) {
+            errx(EXIT_FAILURE, "bad log!: %s", argv[1]); 
+          }
+
 
           break;
       }
