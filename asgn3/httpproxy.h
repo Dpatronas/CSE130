@@ -40,7 +40,6 @@ typedef enum method {
 // Message object
 struct ClientRequest {
   char c_request[PROCESS_BODY_SIZE];     // Entire Client Request
-  char s_request[PROCESS_BODY_SIZE];     // Client Request to send to proxy
 
   int status_code;      // Code for Response
   int client_socket;    // Client connection fd
@@ -116,8 +115,6 @@ int ParseClientLine(char * line, struct ClientRequest * rObj);
 
 // Returns 1 if client request field is bad
 int isBadRequest(struct ClientRequest * rObj);
-
-void relayMessagetoServer(struct ClientRequest * rObj, int server_port);
 
 void forwardServerResponse(int infile, int outfile);
 

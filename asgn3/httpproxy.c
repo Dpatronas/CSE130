@@ -45,6 +45,128 @@ static uint32_t cache_capacity = 3;   // 0 means no caching
 static uint32_t max_file_size = 1024; // 0 means no caching
 
 
+// Returns 1 if request field is bad
+int isBadRequest(struct ClientRequest * rObj) {
+
+  // Check version matches protocol
+  if (!(strncmp(rObj->version,"HTTP/1.1",8) == 0)) {
+    return 1;
+  }
+  // Check file name begins with backslash
+  if (!(strncmp(rObj->resource, "//", 1) == 0)) {
+    return 1;
+  }
+  // Remove file name backslash
+  memmove(rObj->resource, rObj->resource+1, strlen(rObj->resource));  
+  
+  // Check file length
+  if (strlen(rObj->resource) > 19) {  
+    return 1;
+  }
+  // Check file name characters is valid
+  for (size_t i = 0; i < strlen(rObj->resource); i++) {
+    if ( !(isalnum(rObj->resource[i])) && (rObj->resource[i] != '_') && (rObj->resource[i] != '.')) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+
+// Parse request header (line by line)
+// Returns -1 if header was not processed due to bad header request.
+int ParseClientHeader(char * c_request, struct ClientRequest * rObj) {
+
+  char * tok = strtok (c_request, "\r\n");
+  while (tok != NULL)
+  {
+    c_request += strlen(tok) + strlen("\r\n");      // manually set index
+    int parse_status = ParseClientLine(tok, rObj);  // return status of parseLine
+    if (parse_status < 0) {
+      return -1;
+    }
+    tok = strtok (c_request, "\r\n");  // get next line
+  }
+  return 1;
+}
+
+
+// Parse line of request header (from Client)
+//    - Populate the message object fields
+//    - returns -1 if header fields not accepted.
+int ParseClientLine(char * line, struct ClientRequest * rObj) {
+  int param_count = 0;
+  int param_type = -1;
+  char params[20][HEADER_SIZE];
+  char * indx;
+
+  // Lines expected
+  enum {
+    _GET = 0,
+    _HOST, 
+
+    PARAMTOTAL,
+  };
+  const int type_count = PARAMTOTAL;
+
+  // Map enum to string
+  char* types[PARAMTOTAL] = {
+    [_GET] =            "GET",
+    [_HOST] =           "Host:",
+  };
+
+  char * tok = NULL;
+  tok = strtok_r (line, " ", &indx); // gets first parameter of line
+
+  while (tok != NULL) 
+  {
+    if (param_count == 0) {
+      for (int i = 0; i < type_count; ++i) {
+        if (strstr(tok, types[i])) {
+          param_type = i;
+          break;
+        }
+      }
+    }
+    else {
+      strncpy(params[param_count - 1], tok, HEADER_SIZE);
+    }
+
+    param_count++;
+    tok = strtok_r (NULL, " ", &indx);
+  }
+  // Unexpected line
+  if (param_type == -1) {
+    // fprintf(stderr, "Unknown req/param, ignoring line\n" );
+  }
+
+  switch(param_type) {
+    case _GET: {  // todo error check that param_count is within range of expectation..
+      rObj->method = _GET_;
+      strcpy(rObj->resource, params[0]); 
+      strcpy(rObj->version, params[1]);
+      break;
+    }
+   case _HOST: {
+      //Additional parameter(s) than expected indicate spaces on hostvalue
+      if (param_count > 2) { 
+        return -1;
+      }
+      tok = strtok(params[0], ":"); 
+      strcpy(rObj->hostname, tok); //localhost
+
+      tok = strtok (NULL, " ");
+      strcpy(rObj->hostvalue, tok); //8080
+      break;
+   }
+   default: {
+      break;
+    }
+  }
+  return 1;
+}
+
+
 // Converts a string to an 16 bits unsigned integer.
 uint16_t strtouint16(char number[]) {
   char *last;
@@ -108,7 +230,6 @@ void ProxyResponse(struct ClientRequest rObj) {
 // Process server response to client
 void forwardServerResponse(int infile, int outfile) {
   responses++;  // response is fulfilled
-  printf("Responses = %d\n", responses);
 
   struct timeval tv;
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
@@ -131,16 +252,12 @@ void forwardServerResponse(int infile, int outfile) {
 
 
 // Forward Server response to client
-void relayMessagetoServer(struct ClientRequest * rObj, int server_port) {
-
-  // server_port = server_pool[0]; //DBG
-  int serverfd = create_client_socket(server_port);
-
-  // send client request to server chosen
-  send(serverfd, rObj->s_request, strlen(rObj->s_request), 0);
-
-  forwardServerResponse(serverfd, rObj->client_socket);
-
+void relayMessagetoServer(char* msg, size_t len, int dst_fd, int src_fd) {
+  int ret = send(dst_fd, msg, len, 0);
+  if (ret > 0)
+  {
+    forwardServerResponse(dst_fd, src_fd);
+  }
 }
 
 
@@ -160,7 +277,6 @@ int healthCheckServers() {
   unsigned int lowestTotal = HEADER_SIZE;
   int chosen = -1;
 
-  // printf("servers = %d \n", servers);
   for (int i = 0 ; i < servers; i++) {
 
     memset(healthRequest,0,sizeof (healthRequest));
@@ -180,7 +296,6 @@ int healthCheckServers() {
     // Request health check from the current server
     int s = send(serverfd, healthRequest, strlen(healthRequest), 0);
     if (s < 0) { continue;}
-    // printf("sended: %d\n ", s);
 
     sleep(0.1);
 
@@ -197,17 +312,10 @@ int healthCheckServers() {
         close(serverfd);
         break;
       }
-      // write(STDOUT_FILENO, healthStatus, rdCount);
     }
-
-    printf("health response server %d, %d : \n%s\n", i, server_pool[i], healthStatus);
 
     sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
       &status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
-
-      printf("Status = %d \n", status);
-      // printf("Server status %d \n", server_status[i]);
-      printf("server i: (%d,%d) errors %d entries %d \n", i, server_pool[i], server_errors[i], server_entries[i]);
 
     // Response code ! 200 == skip server
     if (status != 200) {
@@ -226,11 +334,8 @@ int healthCheckServers() {
         chosen = i;
       }
     }
-    close(serverfd);    
+    close(serverfd);
   }
-
-  printf("Server chosen %d \n", server_pool[chosen]);
-  printf(" status %d  errors %d entries %d\n\n", server_status[chosen], server_errors[chosen], server_entries[chosen]);
 
   free(healthStatus);
 
@@ -260,7 +365,6 @@ void ProcessClientRequest(char *c_request, int connfd) {
   // update server to do port forwarding on
   if (responses % healthFrequency == 0) {
     currentChosenServer = healthCheckServers();
-    printf("current server = %d", currentChosenServer);
   }
 
   int server_port = currentChosenServer;
@@ -272,14 +376,14 @@ void ProcessClientRequest(char *c_request, int connfd) {
     return;
   }
 
-  // Construct the server request
-  sprintf(rObj.s_request, "GET /%s %s\r\nHost: localhost:%d\r\n\r\n", 
-    rObj.resource, rObj.version, server_port);
-
   // Check commands. Send Request to Server 
   if ((rObj.method == _GET_)) {
-    relayMessagetoServer(&rObj, server_port);
-    return;
+    int serverfd = create_client_socket(server_port);
+    if (serverfd > 0)
+    {
+      relayMessagetoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
+      close(serverfd);
+    }
   }
 
   else {
@@ -349,6 +453,16 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
     printf("\n [!] Accepted connection %d, pushing to queue\n", clientfd);
     queue_push(clientfd);
   }
+
+    // Release thread pool
+  for (int i = 0; i < threads; i++) {
+    pthread_join(*thread_pool[i]->ptr, NULL); // Threads finish work
+    free(thread_pool[i]->ptr);
+    free(thread_pool[i]);
+  }
+  
+  free(thread_pool);
+  close(listenfd);
 }
 
 
@@ -412,18 +526,14 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  printf ("Proxy_port = %d \n Threads = %d \n HealthFreq = %d \n cache_capacity = %d \n max_file_size = %d \n\n Server_port = ", 
-    proxy_port, set_Threads, healthFrequency, cache_capacity, max_file_size);
+  // printf ("Proxy_port = %d \n Threads = %d \n HealthFreq = %d \n cache_capacity = %d \n max_file_size = %d \n\n Server_port = ", 
+    // proxy_port, set_Threads, healthFrequency, cache_capacity, max_file_size);
 
   int i = 0;
   while(server_pool[i]) {
-    printf("%d ", server_pool[i]);
-    printf("%d ", server_status[i]);
-    printf("%d ", server_errors[i]);
-    printf("%d ", server_entries[i]);
+    // printf("%d ", server_pool[i]);
     i++;
   }
-  printf("\n");
   servers = i;
 
   // Fail if no server port is provided
@@ -435,144 +545,10 @@ int main(int argc, char *argv[]) {
 // CLEAN UP
 //=========================================================================================
 
-  // Release thread pool
-  for (int i = 0; i < set_Threads; i++) {
-    pthread_join(*thread_pool[i]->ptr, NULL); // Threads finish work
-    free(thread_pool[i]->ptr);
-    free(thread_pool[i]);
-  }
-
   free(server_status );
   free(server_errors );
   free(server_entries);
-  free(thread_pool);
   free(server_pool);
 
   return EXIT_SUCCESS;
-}
-
-
-// Returns 1 if request field is bad
-int isBadRequest(struct ClientRequest * rObj) {
-
-  // Check version matches protocol
-  if (!(strncmp(rObj->version,"HTTP/1.1",8) == 0)) {
-    return 1;
-  }
-  // Check file name begins with backslash
-  if (!(strncmp(rObj->resource, "//", 1) == 0)) {
-    return 1;
-  }
-  // Remove file name backslash
-  memmove(rObj->resource, rObj->resource+1, strlen(rObj->resource));  
-  
-  // Check file length
-  if (strlen(rObj->resource) > 19) {  
-    return 1;
-  }
-  // Check file name characters is valid
-  for (size_t i = 0; i < strlen(rObj->resource); i++) {
-    if ( !(isalnum(rObj->resource[i])) && (rObj->resource[i] != '_') && (rObj->resource[i] != '.')) {
-      return 1;
-    }
-  }
-  return 0;
-}
-
-
-// Parse request header (line by line)
-// Returns -1 if header was not processed due to bad header request.
-int ParseClientHeader(char * c_request, struct ClientRequest * rObj) {
-
-  char * tok = strtok (c_request, "\r\n");
-  // printf("\n[DBG] tok %s \n", tok);
-
-  while (tok != NULL)
-  {
-    c_request += strlen(tok) + strlen("\r\n"); // manually set index
-    // printf("[DBG] Line: %s \n", tok);
-    int parse_status = ParseClientLine(tok, rObj);      // return status of parseLine
-    if (parse_status < 0) {
-      return -1;
-    }
-    tok = strtok (c_request, "\r\n");  // get next line
-  }
-  return 1;
-}
-
-
-// Parse line of request header (from Client)
-//    - Populate the message object fields
-//    - returns -1 if header fields not accepted.
-int ParseClientLine(char * line, struct ClientRequest * rObj) {
-  int param_count = 0;
-  int param_type = -1;
-  char params[20][HEADER_SIZE];
-  char * indx;
-
-  // Lines expected
-  enum {
-    _GET = 0,
-    _HOST, 
-
-    PARAMTOTAL,
-  };
-  const int type_count = PARAMTOTAL;
-
-  // Map enum to string
-  char* types[PARAMTOTAL] = {
-    [_GET] =            "GET",
-    [_HOST] =           "Host:",
-  };
-
-  char * tok = NULL;
-  tok = strtok_r (line, " ", &indx); // gets first parameter of line
-
-  while (tok != NULL) 
-  {
-    // printf("[DBG] %s \n", tok);
-    if (param_count == 0) {
-      for (int i = 0; i < type_count; ++i) {
-        if (strstr(tok, types[i])) {
-          param_type = i;
-          break;
-        }
-      }
-    }
-    else {
-      strncpy(params[param_count - 1], tok, HEADER_SIZE);
-    }
-
-    param_count++;
-    tok = strtok_r (NULL, " ", &indx);
-  }
-  // Unexpected line
-  if (param_type == -1) {
-    // fprintf(stderr, "Unknown req/param, ignoring line\n" );
-  }
-
-  switch(param_type) {
-    case _GET: {  // todo error check that param_count is within range of expectation..
-      rObj->method = _GET_;
-      strcpy(rObj->resource, params[0]); 
-      strcpy(rObj->version, params[1]);
-      break;
-    }
-   case _HOST: {
-      //Additional parameter(s) than expected indicate spaces on hostvalue
-      if (param_count > 2) { 
-        return -1;
-      }
-      tok = strtok(params[0], ":"); 
-      strcpy(rObj->hostname, tok); //localhost
-
-      tok = strtok (NULL, " ");
-      strcpy(rObj->hostvalue, tok); //8080
-      break;
-   }
-   default: {
-      break;
-    }
-  }
-  return 1;
 }
