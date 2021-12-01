@@ -6,3 +6,4 @@
 void queue_init(void);
 void queue_push(int connfd);
 int queue_pop(void);
+void free_queue();

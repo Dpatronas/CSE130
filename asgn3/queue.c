@@ -2,9 +2,6 @@
 
 // Sources:
 /** 
-    Semaphore type: 
-        http://www.eventorient.com/2017/07/semaphores-in-mac-os-x-seminit-is.html
-
     man queue:
     TAIL QUEUES
          A tail queue is headed by a structure defined by the TAILQ_HEAD macro.
@@ -42,6 +39,9 @@
 #include <pthread.h>
 #include <semaphore.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+
 #include "queue.h"
 
 TAILQ_HEAD(tailhead, connNode) head = TAILQ_HEAD_INITIALIZER(head);
@@ -58,8 +58,14 @@ Semaphore* sem;
 Semaphore* lock;
 
 static Semaphore *make_semaphore(int value){
+
     Semaphore *semaphore = (Semaphore *) malloc(sizeof(Semaphore));
-    semaphore = sem_open("/semaphore", O_CREAT, 0644, value);
+    memset(&semaphore, 0, sizeof(semaphore));
+
+    if ((semaphore = sem_open("/semaphore", O_CREAT, 0644, value)) == SEM_FAILED) {
+        perror("Bad Semaphore init");
+        exit(1);
+    }
     sem_unlink("/semaphore");
     return semaphore;
 }
@@ -102,10 +108,24 @@ int queue_pop(void) {
     {
         struct connNode * node = TAILQ_FIRST(&head);
         n = node->connfd;
-        TAILQ_REMOVE(&head, node, entries);       /* Deletion. */
+        TAILQ_REMOVE(&head, node, entries);
         free(node);
     }
     semaphore_signal(lock);
 
     return n;
+}
+
+void free_queue() {
+    sem_close(sem);
+    sem_close(lock);
+
+    while (!TAILQ_EMPTY(&head)) {
+        struct connNode * node = TAILQ_FIRST(&head);
+        TAILQ_REMOVE(&head, node, entries);
+        free(node);
+    }
+
+    free(sem);
+    free(lock);
 }

@@ -211,7 +211,7 @@ int create_client_socket(uint16_t port) {
 
 
 // Proxy Responds to Client for bad status codes 400 and 501.
-// All other responses to client are done via server forwarding
+// Note: All other responses to client are done via server forwarding
 void ProxyResponse(struct ClientRequest rObj) {
 
   char response[HEADER_SIZE];
@@ -232,20 +232,21 @@ void forwardServerResponse(int infile, int outfile) {
   responses++;  // response is fulfilled
 
   struct timeval tv;
+
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
   if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
 
-  // Client will terminate once all bytes are received
+  // Client should terminate once all bytes received. Thread exits.
   while(1)
   {
     tv.tv_usec = 100;
     setsockopt(infile, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
     int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
-    write(outfile, readbuff, rdCount);
     if (rdCount <= 0) {
       break;
     }
+    write(outfile, readbuff, rdCount);
   }
   free(readbuff);
 }
@@ -272,7 +273,7 @@ int healthCheckServers() {
 
   char buff[HEADER_SIZE];
   int len;
-  int status;
+  int serv_status;
 
   unsigned int lowestTotal = HEADER_SIZE;
   int chosen = -1;
@@ -304,7 +305,6 @@ int healthCheckServers() {
     {
       tv.tv_usec = 1000;
       setsockopt(serverfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
-
       int rdCount = read(serverfd, healthStatus, PROCESS_BODY_SIZE);
       
       if (rdCount <= 0) {
@@ -315,10 +315,11 @@ int healthCheckServers() {
     }
 
     sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
-      &status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
+      &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
+    
 
     // Response code ! 200 == skip server
-    if (status != 200) {
+    if (serv_status != 200) {
       server_status[i] = 0;
       continue;
     }
@@ -336,8 +337,8 @@ int healthCheckServers() {
     }
     close(serverfd);
   }
-
   free(healthStatus);
+  healthStatus = NULL;
 
   // all servers offline cannot process request via forwarding
   if (chosen < 0) {
@@ -354,17 +355,18 @@ void ProcessClientRequest(char *c_request, int connfd) {
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
+  // update server to do port forwarding on
+  // Do so before processing
+  if (responses % healthFrequency == 0) {
+    currentChosenServer = healthCheckServers();
+  }
+
   int parse_status = ParseClientHeader(c_request, &rObj);
 
   if (parse_status < 0 || isBadRequest(&rObj)) {
     rObj.status_code = 400;
     ProxyResponse(rObj);
     return;
-  }
-
-  // update server to do port forwarding on
-  if (responses % healthFrequency == 0) {
-    currentChosenServer = healthCheckServers();
   }
 
   int server_port = currentChosenServer;
@@ -461,6 +463,7 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
     free(thread_pool[i]);
   }
   
+  free_queue();
   free(thread_pool);
   close(listenfd);
 }
@@ -472,19 +475,19 @@ int main(int argc, char *argv[]) {
   uint16_t server_port = 0;
   uint16_t proxy_port = 0;
   uint16_t set_Threads = 5;
-
   int opt;
 
   if (argc < 3) { errx(EXIT_FAILURE, "A proxy & server port number is required!"); }
   
   // Get non-option server ports
-  server_pool = (uint16_t *) malloc ((argc-2) * sizeof (uint16_t));  
-  if (!server_pool) {fprintf(stderr, "Bad malloc!"); return -1;}
+  server_pool    = (uint16_t *) malloc ((argc-2) * sizeof (uint16_t));
+  server_status  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
+  server_errors  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
+  server_entries = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
+  if (!server_pool || !server_status || !server_errors || !server_entries) {
+    fprintf(stderr, "Bad malloc!"); return -1;
+  }
 
-  server_status = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));  
-  server_errors = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));  
-  server_entries =(uint32_t *) malloc ((argc-2) * sizeof (uint32_t));  
-  
   int j = 0;
 
   // Get opts
@@ -526,12 +529,8 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // printf ("Proxy_port = %d \n Threads = %d \n HealthFreq = %d \n cache_capacity = %d \n max_file_size = %d \n\n Server_port = ", 
-    // proxy_port, set_Threads, healthFrequency, cache_capacity, max_file_size);
-
   int i = 0;
   while(server_pool[i]) {
-    // printf("%d ", server_pool[i]);
     i++;
   }
   servers = i;
