@@ -238,7 +238,7 @@ void forwardServerResponse(int infile, int outfile) {
   // Client should terminate once all bytes received. Thread exits.
   while(1)
   {
-    tv.tv_usec = 100;
+    tv.tv_usec = 200;
     setsockopt(infile, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
 
     int rdCount = read(infile, readbuff, PROCESS_BODY_SIZE);
@@ -269,11 +269,12 @@ int healthCheckServers() {
   struct timeval tv;
 
   char healthRequest[HEADER_SIZE];
-  char* healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
+  char * healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
 
   char buff[HEADER_SIZE];
   int len;
   int serv_status;
+
 
   unsigned int lowestTotal = HEADER_SIZE;
   int chosen = -1;
@@ -297,6 +298,8 @@ int healthCheckServers() {
     // Request health check from the current server
     int s = send(serverfd, healthRequest, strlen(healthRequest), 0);
     if (s < 0) { continue;}
+    
+    memset(healthRequest,0,sizeof (healthRequest));
 
     // muliple recvs use timeout to end recv loop
     while(1)
@@ -311,11 +314,21 @@ int healthCheckServers() {
         break;
       }
     }
-    printf("healthcheck [%d] \n%s\n", server_pool[i], healthStatus);
 
-    sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
-      &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
-    
+    // printf("healthStatus [%d] \n", server_pool[i]);
+    // printf("strlen healthStatus %ld\n\n", strlen(healthStatus));
+    // printf("msg = \n%s\n", healthStatus);
+
+    if (strlen(healthStatus) < 88) {
+      sscanf(healthStatus, "%u\r\n%u\r\n%s %d",
+          &server_errors[i], &server_entries[i], buff, &serv_status);
+    }
+    else {
+      sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
+          &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
+    }
+
+    // printf("[!] %d <%u><%u>\n", serv_status, server_errors[i], server_entries[i]);
 
     // Response code ! 200 == skip server set to offline
     if (serv_status != 200) {
@@ -357,12 +370,12 @@ void ProcessClientRequest(char *c_request, int connfd) {
   strcpy(rObj.c_request, c_request);
 
   // update server to do port forwarding on. Do so before processing
-  printf("Total Healthcheck: #%d\n", healthchecks);
-  printf("Total responses %d\n", responses);
+  // printf("Total Healthcheck: #%d\n", healthchecks);
+  // printf("Total responses %d\n", responses);
 
   if (responses % healthFrequency == 0) {
     currentChosenServer = healthCheckServers();
-    printf("chosen server port = %d\n", currentChosenServer);
+    // printf("chosen server port = %d\n", currentChosenServer);
     healthchecks++;
   }
   responses++;  // response will be fulfilled
@@ -426,7 +439,7 @@ void * workerThread(void * arg) {
     int connfd_job = queue_pop();
     if (connfd_job != -1)
     {
-      printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
+      // printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
       printf("[Worker %d] JOB DONE \n", ctx->tid);
     }
@@ -458,7 +471,7 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
   {
     int clientfd = accept(listenfd, NULL, NULL);
     if (clientfd < 0) { warn("accept error"); continue; }
-    printf("\n [!] Accepted connection %d, pushing to queue\n", clientfd);
+    // printf("\n [!] Accepted connection %d, pushing to queue\n", clientfd);
     queue_push(clientfd);
   }
 
