@@ -44,6 +44,7 @@ static int currentChosenServer = 0; // Server to port forward based on healthche
 static uint32_t cache_capacity = 3;   // 0 means no caching
 static uint32_t max_file_size = 1024; // 0 means no caching
 
+static int healthchecks = 0;
 
 // Returns 1 if request field is bad
 int isBadRequest(struct ClientRequest * rObj) {
@@ -229,8 +230,6 @@ void ProxyResponse(struct ClientRequest rObj) {
 
 // Process server response to client
 void forwardServerResponse(int infile, int outfile) {
-  responses++;  // response is fulfilled
-
   struct timeval tv;
 
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
@@ -249,6 +248,7 @@ void forwardServerResponse(int infile, int outfile) {
     write(outfile, readbuff, rdCount);
   }
   free(readbuff);
+  readbuff = NULL;
 }
 
 
@@ -283,12 +283,12 @@ int healthCheckServers() {
     memset(healthRequest,0,sizeof (healthRequest));
     memset(buff, 0, sizeof (buff));
 
+
     sprintf(healthRequest, "GET /healthcheck HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", server_pool[i]);
 
     int serverfd = create_client_socket(server_pool[i]);
 
-    // skip bad server
-    // 1) sever not connecting
+    // skip server not connecting
     if (serverfd < 0) {
       server_status[i] = 0;
       continue;
@@ -298,12 +298,10 @@ int healthCheckServers() {
     int s = send(serverfd, healthRequest, strlen(healthRequest), 0);
     if (s < 0) { continue;}
 
-    sleep(0.1);
-
     // muliple recvs use timeout to end recv loop
     while(1)
     {
-      tv.tv_usec = 1000;
+      tv.tv_usec = 100;
       setsockopt(serverfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof tv);
       int rdCount = read(serverfd, healthStatus, PROCESS_BODY_SIZE);
       
@@ -313,23 +311,25 @@ int healthCheckServers() {
         break;
       }
     }
+    printf("healthcheck [%d] \n%s\n", server_pool[i], healthStatus);
 
     sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
       &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
     
 
-    // Response code ! 200 == skip server
+    // Response code ! 200 == skip server set to offline
     if (serv_status != 200) {
       server_status[i] = 0;
       continue;
     }
 
-    // Prioritize chosen server
+    // Prioritize least requested server
     if (server_entries[i] < lowestTotal) {
       lowestTotal = server_entries[i];
       chosen = i;
     }
-    // Break tie chose lowest errors
+
+    // Break tie w/ lowest errors
     else if (server_entries[i] == lowestTotal) {
       if (server_errors[i] < server_errors[chosen]) {
         chosen = i;
@@ -337,6 +337,7 @@ int healthCheckServers() {
     }
     close(serverfd);
   }
+
   free(healthStatus);
   healthStatus = NULL;
 
@@ -355,11 +356,16 @@ void ProcessClientRequest(char *c_request, int connfd) {
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
-  // update server to do port forwarding on
-  // Do so before processing
+  // update server to do port forwarding on. Do so before processing
+  printf("Total Healthcheck: #%d\n", healthchecks);
+  printf("Total responses %d\n", responses);
+
   if (responses % healthFrequency == 0) {
     currentChosenServer = healthCheckServers();
+    printf("chosen server port = %d\n", currentChosenServer);
+    healthchecks++;
   }
+  responses++;  // response will be fulfilled
 
   int parse_status = ParseClientHeader(c_request, &rObj);
 
@@ -461,10 +467,13 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
     pthread_join(*thread_pool[i]->ptr, NULL); // Threads finish work
     free(thread_pool[i]->ptr);
     free(thread_pool[i]);
+    thread_pool[i] = NULL;
   }
   
   free_queue();
   free(thread_pool);
+
+  thread_pool = NULL;
   close(listenfd);
 }
 
@@ -487,8 +496,6 @@ int main(int argc, char *argv[]) {
   if (!server_pool || !server_status || !server_errors || !server_entries) {
     fprintf(stderr, "Bad malloc!"); return -1;
   }
-
-  int j = 0;
 
   // Get opts
   while (optind < argc)
@@ -520,23 +527,20 @@ int main(int argc, char *argv[]) {
       }
       else {
         server_port = strtouint16(argv[optind++]);
-        server_pool[j] = server_port;
-        server_status[j] = 1;  // 0 == offline, 1 == online
-        server_errors[j] = 0;  // bad logs
-        server_entries[j] = 0; // total logs
-        j++;
+        server_pool   [servers] = server_port;
+        server_status [servers] = 1;  // 0 == offline, 1 == online
+        server_errors [servers] = 0;  // bad logs
+        server_entries[servers] = 0;  // total logs
+        servers++;
       }
     }
   }
 
-  int i = 0;
-  while(server_pool[i]) {
-    i++;
-  }
-  servers = i;
+  // printf ("Proxy_port = %d \n Threads = %d \n HealthFreq = %d \n cache_capacity = %d \n max_file_size = %d \n\n Server_port = ", 
+    // proxy_port, set_Threads, healthFrequency, cache_capacity, max_file_size);
 
   // Fail if no server port is provided
-  if (i == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }
+  if (servers == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }
 
   MultiThreadingProcess(set_Threads, proxy_port);
 
@@ -548,6 +552,9 @@ int main(int argc, char *argv[]) {
   free(server_errors );
   free(server_entries);
   free(server_pool);
+
+  server_status = server_errors = server_entries = NULL;
+  server_pool = NULL;
 
   return EXIT_SUCCESS;
 }

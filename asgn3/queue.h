@@ -1,4 +1,4 @@
-// Despina Patronas CSE130 Fall 2021 asgn2
+// Despina Patronas CSE130 Fall 2021 asgn3
 
 #include <stdlib.h>
 #include <ctype.h>
