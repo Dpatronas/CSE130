@@ -31,20 +31,21 @@
 extern int errno;
 struct stat st;
 
-static int healthFrequency = 5;     // # of times to healthcheck servers
-static int responses = 0;           // # of proxy responses fulfilled
-  
+static int responses = 0;           // # of responses fulfilled guarded
+pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;  //guard the shared responses variable
+
 static uint16_t * server_pool;      // holds server ports
 static uint32_t * server_status;    // 0 == offline, 1 == online
 static uint32_t * server_errors;    // bad logs
 static uint32_t * server_entries;   // total logs
+
 static int servers = 0;             // # of server
-static int currentChosenServer = 0; // Server to port forward based on healthcheck
+static int currentChosenServer = 1024; // Server to port forward based on healthcheck
 
 static uint32_t cache_capacity = 3;   // 0 means no caching
 static uint32_t max_file_size = 1024; // 0 means no caching
 
-static int healthchecks = 0;
+static int healthFrequency = 5;     // # of times to healthcheck servers
 
 // Returns 1 if request field is bad
 int isBadRequest(struct ClientRequest * rObj) {
@@ -235,7 +236,6 @@ void forwardServerResponse(int infile, int outfile) {
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
   if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
 
-  // Client should terminate once all bytes received. Thread exits.
   while(1)
   {
     tv.tv_usec = 200;
@@ -269,26 +269,27 @@ int healthCheckServers() {
   struct timeval tv;
 
   char healthRequest[HEADER_SIZE];
-  char * healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
-
   char buff[HEADER_SIZE];
   int len;
   int serv_status;
 
-
-  unsigned int lowestTotal = HEADER_SIZE;
+  unsigned int lowestTotal = currentChosenServer;
   int chosen = -1;
+
+  int i= 0;
+  while(server_pool[i]) {
+    printf("       old %d %d\n", server_errors[i], server_entries[i]);
+    i++;
+  }
 
   for (int i = 0 ; i < servers; i++) {
 
     memset(healthRequest,0,sizeof (healthRequest));
     memset(buff, 0, sizeof (buff));
 
-
     sprintf(healthRequest, "GET /healthcheck HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", server_pool[i]);
 
     int serverfd = create_client_socket(server_pool[i]);
-
     // skip server not connecting
     if (serverfd < 0) {
       server_status[i] = 0;
@@ -299,7 +300,7 @@ int healthCheckServers() {
     int s = send(serverfd, healthRequest, strlen(healthRequest), 0);
     if (s < 0) { continue;}
     
-    memset(healthRequest,0,sizeof (healthRequest));
+    char * healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
 
     // muliple recvs use timeout to end recv loop
     while(1)
@@ -314,10 +315,7 @@ int healthCheckServers() {
         break;
       }
     }
-
-    // printf("healthStatus [%d] \n", server_pool[i]);
-    // printf("strlen healthStatus %ld\n\n", strlen(healthStatus));
-    // printf("msg = \n%s\n", healthStatus);
+    // printf("\n%s\n%ld\n", healthStatus, strlen(healthStatus));
 
     if (strlen(healthStatus) < 88) {
       sscanf(healthStatus, "%u\r\n%u\r\n%s %d",
@@ -327,8 +325,11 @@ int healthCheckServers() {
       sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
           &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
     }
+    
+    free(healthStatus);
+    healthStatus = NULL;
 
-    // printf("[!] %d <%u><%u>\n", serv_status, server_errors[i], server_entries[i]);
+    printf("[!] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
 
     // Response code ! 200 == skip server set to offline
     if (serv_status != 200) {
@@ -338,21 +339,27 @@ int healthCheckServers() {
 
     // Prioritize least requested server
     if (server_entries[i] < lowestTotal) {
+      // printf("\ncurr lowest entries: #%d [%d]   VS   serverentries: #%d [%d]\n\n", 
+        // lowestTotal, server_pool[chosen], server_entries[i], server_pool[i]);
+
       lowestTotal = server_entries[i];
       chosen = i;
     }
 
     // Break tie w/ lowest errors
     else if (server_entries[i] == lowestTotal) {
+      // printf("\ntie: %d [%d] : %d[%d] \n",
+        // lowestTotal, server_pool[chosen], server_entries[i], server_pool[i]);
+
       if (server_errors[i] < server_errors[chosen]) {
+        // printf("\ncurr lowest fails %d [%d]   VS   serverfails: %d [%d] \n",
+          // server_errors[chosen], server_pool[chosen], server_errors[i], server_pool[i]);
+
         chosen = i;
       }
     }
     close(serverfd);
   }
-
-  free(healthStatus);
-  healthStatus = NULL;
 
   // all servers offline cannot process request via forwarding
   if (chosen < 0) {
@@ -369,16 +376,9 @@ void ProcessClientRequest(char *c_request, int connfd) {
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
-  // update server to do port forwarding on. Do so before processing
-  // printf("Total Healthcheck: #%d\n", healthchecks);
-  // printf("Total responses %d\n", responses);
-
-  if (responses % healthFrequency == 0) {
-    currentChosenServer = healthCheckServers();
-    // printf("chosen server port = %d\n", currentChosenServer);
-    healthchecks++;
-  }
-  responses++;  // response will be fulfilled
+  pthread_mutex_lock(&mtx);
+  responses++;                // response will be fulfilled
+  pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseClientHeader(c_request, &rObj);
 
@@ -431,7 +431,7 @@ void HandleConnection(int connfd) {
 
 
 // Assign jobs to worker threads
-void * workerThread(void * arg) {
+void * ThreadDispatcher(void * arg) {
   threadProcess_t* ctx = (threadProcess_t*)arg;
   // printf("Worker %i started\n", ctx->tid);
   while (1)
@@ -439,6 +439,12 @@ void * workerThread(void * arg) {
     int connfd_job = queue_pop();
     if (connfd_job != -1)
     {
+      // Initiate Healthcheck
+      if (responses % healthFrequency == 0) {
+        currentChosenServer = healthCheckServers();
+        printf("chosen server port = %d\n", currentChosenServer);
+      }
+
       // printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
       printf("[Worker %d] JOB DONE \n", ctx->tid);
@@ -462,7 +468,7 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
 
     thread_pool[i]->tid   = i;
     thread_pool[i]->ptr   = (pthread_t *) malloc (sizeof(pthread_t));
-    pthread_create( thread_pool[i]->ptr, NULL, &workerThread, (void*)thread_pool[i]);
+    pthread_create( thread_pool[i]->ptr, NULL, &ThreadDispatcher, (void*)thread_pool[i]);
   }
   
   int listenfd = create_listen_socket(server_port);
@@ -548,9 +554,12 @@ int main(int argc, char *argv[]) {
       }
     }
   }
-
-  // printf ("Proxy_port = %d \n Threads = %d \n HealthFreq = %d \n cache_capacity = %d \n max_file_size = %d \n\n Server_port = ", 
-    // proxy_port, set_Threads, healthFrequency, cache_capacity, max_file_size);
+  int i = 0;
+  while(server_pool[i]) {
+    printf("%d ", server_pool[i]);
+    i++;
+  }
+  printf("\n");
 
   // Fail if no server port is provided
   if (servers == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }

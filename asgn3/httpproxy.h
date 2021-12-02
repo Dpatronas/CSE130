@@ -99,7 +99,7 @@ void ProcessClientRequest(char *request, int connfd);
 void HandleConnection(int connfd);
 
 //  Assign a client to a worker thread. Worker thread takes in thread id.
-void * workerThread(void * arg);
+void * ThreadDispatcher(void * arg);
 
 // Start up worker threads and client queue. Look for new clients to push into queue.
 void MultiThreadingProcess(uint16_t threads, uint16_t server_port);
