@@ -35,7 +35,6 @@ static int responses = 0;           // # of responses fulfilled guarded
 pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;  //guard the shared responses variable
 
 static uint16_t * server_pool;      // holds server ports
-static uint32_t * server_status;    // 0 == offline, 1 == online
 static uint32_t * server_errors;    // bad logs
 static uint32_t * server_entries;   // total logs
 
@@ -44,6 +43,7 @@ static int currentChosenServer = 1024; // Server to port forward based on health
 
 static uint32_t cache_capacity = 3;   // 0 means no caching
 static uint32_t max_file_size = 1024; // 0 means no caching
+static int cache_enabled = 1;         // default. cache is enabled
 
 static int healthFrequency = 5;     // # of times to healthcheck servers
 
@@ -213,6 +213,7 @@ int create_client_socket(uint16_t port) {
 
 
 // Proxy Responds to Client for bad status codes 400 and 501.
+// If Proxy has most recent file in cache, it will respond with 200
 // Note: All other responses to client are done via server forwarding
 void ProxyResponse(struct ClientRequest rObj) {
 
@@ -230,7 +231,7 @@ void ProxyResponse(struct ClientRequest rObj) {
 
 
 // Process server response to client
-void forwardServerResponse(int infile, int outfile) {
+void forwardResponse(int infile, int outfile) {
   struct timeval tv;
 
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
@@ -253,11 +254,11 @@ void forwardServerResponse(int infile, int outfile) {
 
 
 // Forward Server response to client
-void relayMessagetoServer(char* msg, size_t len, int dst_fd, int src_fd) {
-  int ret = send(dst_fd, msg, len, 0);
+void relayRequesttoServer(char* header, size_t len, int dst_fd, int src_fd) {
+  int ret = send(dst_fd, header, len, 0);
   if (ret > 0)
   {
-    forwardServerResponse(dst_fd, src_fd);
+    forwardResponse(dst_fd, src_fd);
   }
 }
 
@@ -276,11 +277,11 @@ int healthCheckServers() {
   unsigned int lowestTotal = currentChosenServer;
   int chosen = -1;
 
-  int i= 0;
-  while(server_pool[i]) {
-    printf("       old %d %d\n", server_errors[i], server_entries[i]);
-    i++;
-  }
+  // int i= 0;
+  // while(server_pool[i]) {
+  //   printf("       old %d %d\n", server_errors[i], server_entries[i]);
+  //   i++;
+  // }
 
   for (int i = 0 ; i < servers; i++) {
 
@@ -292,7 +293,6 @@ int healthCheckServers() {
     int serverfd = create_client_socket(server_pool[i]);
     // skip server not connecting
     if (serverfd < 0) {
-      server_status[i] = 0;
       continue;
     }
 
@@ -303,6 +303,7 @@ int healthCheckServers() {
     char * healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
 
     // muliple recvs use timeout to end recv loop
+    int msgs = 0;
     while(1)
     {
       tv.tv_usec = 100;
@@ -314,13 +315,15 @@ int healthCheckServers() {
         close(serverfd);
         break;
       }
+      msgs++;
     }
-    // printf("\n%s\n%ld\n", healthStatus, strlen(healthStatus));
 
-    if (strlen(healthStatus) < 88) {
+    // Multiple messages
+    if (msgs > 1) {
       sscanf(healthStatus, "%u\r\n%u\r\n%s %d",
           &server_errors[i], &server_entries[i], buff, &serv_status);
     }
+    // One complete message
     else {
       sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
           &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
@@ -333,7 +336,6 @@ int healthCheckServers() {
 
     // Response code ! 200 == skip server set to offline
     if (serv_status != 200) {
-      server_status[i] = 0;
       continue;
     }
 
@@ -361,21 +363,57 @@ int healthCheckServers() {
 }
 
 
-void ProcessClientRequest(char *c_request, int connfd) {
+// // Call head and get response
+// char * ServerHead(char * resource, int server_port) {
 
+//   char headRequest[HEADER_SIZE];
+//   sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resource, server_port);
+
+//   int serverfd = create_client_socket(server_port);
+
+//   // Request health check from the current server
+//   int s = send(serverfd, headRequest, strlen(headRequest), 0);
+//   memset(headRequest,0, sizeof HEADER_SIZE);
+//   int rdCount = read(serverfd, headRequest, HEADER_SIZE);
+  
+//   close(serverfd);
+
+//   return headRequest;
+// }
+
+
+// int checkCache(char * resource, int server_port) {
+//   int found = 0;
+
+//   // Check the name exists in cache
+//   for (int i = 0; i < cache_capacity; i++) {
+//     if (strcmp(cache_directory[i]->name, resource) == 0) {
+//       found = 1;
+//     }
+//   }
+//   if (found == 0) {
+//     return -1;
+//   }
+//   // Check that the file is recent
+//   char server_Age[1024];
+//   strcpy(server_Age, ServerHead(resource));
+// }
+
+
+void ProcessClientRequest(char *c_request, int connfd) {
+  int serverfd = 0;
   struct ClientRequest rObj = {0}; //reset object
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
   pthread_mutex_lock(&mtx);
-  
   // Initiate Healthcheck
   if (responses % healthFrequency == 0) {
     currentChosenServer = healthCheckServers();
     printf("chosen server port = %d\n", currentChosenServer);
   }
-  responses++;                // response will be fulfilled
-
+  responses++;
+  int server_port = currentChosenServer;
   pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseClientHeader(c_request, &rObj);
@@ -386,8 +424,6 @@ void ProcessClientRequest(char *c_request, int connfd) {
     return;
   }
 
-  int server_port = currentChosenServer;
-
   // All servers are down / unresponsive
   if (server_port < 0) {
     rObj.status_code = 500;
@@ -395,12 +431,26 @@ void ProcessClientRequest(char *c_request, int connfd) {
     return;
   }
 
-  // Check commands. Send Request to Server 
+  // Fulfill GET Request
   if ((rObj.method == _GET_)) {
-    int serverfd = create_client_socket(server_port);
-    if (serverfd > 0)
+
+    // Check file name in cache
+    // if (cache_enabled)
+    // {
+    //   if ((int cache_fd = checkCache(rObj->resource, server_port)) > 0) {
+    //     forwardResponse(connfd, cache_fd);
+    //     return;
+    //   }
+    // }
+    // Otherwise get the file from server and store file. in cache
+    if ((serverfd = create_client_socket(server_port)) > 0)
     {
-      relayMessagetoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
+      // if (cache_enabled) {
+      //   // check whether to cache based on file size
+      //   //    replacing oldest cache once cache is full
+      // }
+      // All cases (cache and not cache)
+      relayRequesttoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
       close(serverfd);
     }
   }
@@ -482,9 +532,10 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
   }
   
   queue_deinit();
-  free(thread_pool);
 
+  free(thread_pool);
   thread_pool = NULL;
+
   close(listenfd);
 }
 
@@ -501,10 +552,9 @@ int main(int argc, char *argv[]) {
   
   // Get non-option server ports
   server_pool    = (uint16_t *) malloc ((argc-2) * sizeof (uint16_t));
-  server_status  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
   server_errors  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
   server_entries = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
-  if (!server_pool || !server_status || !server_errors || !server_entries) {
+  if (!server_pool || !server_errors || !server_entries) {
     fprintf(stderr, "Bad malloc!"); return -1;
   }
 
@@ -539,22 +589,30 @@ int main(int argc, char *argv[]) {
       else {
         server_port = strtouint16(argv[optind++]);
         server_pool   [servers] = server_port;
-        server_status [servers] = 1;  // 0 == offline, 1 == online
         server_errors [servers] = 0;  // bad logs
         server_entries[servers] = 0;  // total logs
         servers++;
       }
     }
   }
-  int i = 0;
-  while(server_pool[i]) {
-    printf("%d ", server_pool[i]);
-    i++;
-  }
-  printf("\n");
 
   // Fail if no server port is provided
   if (servers == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }
+
+  // create cache memory
+  if (cache_capacity > 0 && max_file_size > 0) {
+    cache_directory = (cache_file **) malloc(sizeof(cache_file) * cache_capacity);  // caches struct array
+
+    for (unsigned int i = 0; i < cache_capacity; i++) {
+      cache_directory[i] = (cache_file *) malloc(sizeof(cache_file));  // caches struct array
+
+      cache_directory[i]->file_contents = (char *) calloc (max_file_size, sizeof(char));
+      cache_directory[i]->file_size     = -1;
+    }
+  }
+  else {
+    cache_enabled = 0;
+  }
 
   MultiThreadingProcess(set_Threads, proxy_port);
 
@@ -562,12 +620,20 @@ int main(int argc, char *argv[]) {
 // CLEAN UP
 //=========================================================================================
 
-  free(server_status );
   free(server_errors );
   free(server_entries);
   free(server_pool);
 
-  server_status = server_errors = server_entries = NULL;
+  for (unsigned int i = 0; i < cache_capacity; i++) {
+    free(cache_directory[i]->file_contents);
+    free(cache_directory[i]);
+    cache_directory[i] = NULL;
+  }
+
+  free(cache_directory);
+  cache_directory = NULL;
+
+  server_errors = server_entries = NULL;
   server_pool = NULL;
 
   return EXIT_SUCCESS;

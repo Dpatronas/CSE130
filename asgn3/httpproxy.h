@@ -55,6 +55,19 @@ struct ClientRequest {
 } ClientRequest;
 
 
+//=====================================================================================
+// CACHEING 
+// =====================================================================================
+typedef struct {
+  char * age_in_cache;
+  char * name;
+  char * file_contents;
+  int file_size;
+} cache_file;
+
+static cache_file ** cache_directory;  // ptr to cached files
+
+
 //=======================================================================================
 // PROXY SUPPORTED CODES
 //=======================================================================================
@@ -71,13 +84,6 @@ const char* Status(int code) {
   }
   return NULL;
 }
-
-//=====================================================================================
-// SERVER 
-// =====================================================================================
-// struct Servers {
-
-// }
 
 
 //=====================================================================================
@@ -117,7 +123,7 @@ int ParseClientLine(char * line, struct ClientRequest * rObj);
 // Returns 1 if client request field is bad
 int isBadRequest(struct ClientRequest * rObj);
 
-void forwardServerResponse(int infile, int outfile);
+void forwardResponse(int infile, int outfile);
 
 int healthCheckServers();
 //=====================================================================================
