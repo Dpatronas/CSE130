@@ -339,22 +339,13 @@ int healthCheckServers() {
 
     // Prioritize least requested server
     if (server_entries[i] < lowestTotal) {
-      // printf("\ncurr lowest entries: #%d [%d]   VS   serverentries: #%d [%d]\n\n", 
-        // lowestTotal, server_pool[chosen], server_entries[i], server_pool[i]);
-
       lowestTotal = server_entries[i];
       chosen = i;
     }
 
     // Break tie w/ lowest errors
     else if (server_entries[i] == lowestTotal) {
-      // printf("\ntie: %d [%d] : %d[%d] \n",
-        // lowestTotal, server_pool[chosen], server_entries[i], server_pool[i]);
-
       if (server_errors[i] < server_errors[chosen]) {
-        // printf("\ncurr lowest fails %d [%d]   VS   serverfails: %d [%d] \n",
-          // server_errors[chosen], server_pool[chosen], server_errors[i], server_pool[i]);
-
         chosen = i;
       }
     }
@@ -377,7 +368,14 @@ void ProcessClientRequest(char *c_request, int connfd) {
   strcpy(rObj.c_request, c_request);
 
   pthread_mutex_lock(&mtx);
+  
+  // Initiate Healthcheck
+  if (responses % healthFrequency == 0) {
+    currentChosenServer = healthCheckServers();
+    printf("chosen server port = %d\n", currentChosenServer);
+  }
   responses++;                // response will be fulfilled
+
   pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseClientHeader(c_request, &rObj);
@@ -431,7 +429,7 @@ void HandleConnection(int connfd) {
 
 
 // Assign jobs to worker threads
-void * ThreadDispatcher(void * arg) {
+void * WorkerThread(void * arg) {
   threadProcess_t* ctx = (threadProcess_t*)arg;
   // printf("Worker %i started\n", ctx->tid);
   while (1)
@@ -439,12 +437,6 @@ void * ThreadDispatcher(void * arg) {
     int connfd_job = queue_pop();
     if (connfd_job != -1)
     {
-      // Initiate Healthcheck
-      if (responses % healthFrequency == 0) {
-        currentChosenServer = healthCheckServers();
-        printf("chosen server port = %d\n", currentChosenServer);
-      }
-
       // printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
       printf("[Worker %d] JOB DONE \n", ctx->tid);
@@ -468,7 +460,7 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
 
     thread_pool[i]->tid   = i;
     thread_pool[i]->ptr   = (pthread_t *) malloc (sizeof(pthread_t));
-    pthread_create( thread_pool[i]->ptr, NULL, &ThreadDispatcher, (void*)thread_pool[i]);
+    pthread_create( thread_pool[i]->ptr, NULL, &WorkerThread, (void*)thread_pool[i]);
   }
   
   int listenfd = create_listen_socket(server_port);
@@ -489,7 +481,7 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
     thread_pool[i] = NULL;
   }
   
-  free_queue();
+  queue_deinit();
   free(thread_pool);
 
   thread_pool = NULL;

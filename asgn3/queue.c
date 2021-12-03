@@ -85,6 +85,26 @@ void queue_init(void) {
     TAILQ_INIT(&head);
 }
 
+void queue_deinit(void) {
+    if (sem)
+    {
+        sem_close(sem);
+    }
+
+    if (lock)
+    {
+        sem_close(lock);
+    }
+
+    if (!TAILQ_EMPTY(&head))
+    {
+        queue_clear();
+    }
+
+    free(sem); sem = 0;
+    free(lock); lock = 0;
+}
+
 void queue_push(int connfd) {
 
     // atmoic
@@ -116,16 +136,15 @@ int queue_pop(void) {
     return n;
 }
 
-void free_queue() {
-    sem_close(sem);
-    sem_close(lock);
+void queue_clear(void) {
+    semaphore_wait(lock);
 
-    while (!TAILQ_EMPTY(&head)) {
+    while(!TAILQ_EMPTY(&head))
+    {
         struct connNode * node = TAILQ_FIRST(&head);
         TAILQ_REMOVE(&head, node, entries);
         free(node);
     }
 
-    free(sem);
-    free(lock);
+    semaphore_signal(lock);
 }
