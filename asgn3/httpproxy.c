@@ -35,11 +35,12 @@ static int responses = 0;           // # of responses fulfilled guarded
 pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;  //guard the shared responses variable
 
 static uint16_t * server_pool;      // holds server ports
+static uint32_t * server_status;    // 0 == offline for balancing
 static uint32_t * server_errors;    // bad logs
 static uint32_t * server_entries;   // total logs
 
 static int servers = 0;             // # of server
-static int currentChosenServer = 1024; // Server to port forward based on healthcheck
+static int currentChosenServer = 0; // Server index to port forward
 
 static uint32_t cache_capacity = 3;   // 0 means no caching
 static uint32_t max_file_size = 1024; // 0 means no caching
@@ -232,11 +233,19 @@ void ProxyResponse(struct ClientRequest rObj) {
 
 // Process server response to client
 void forwardResponse(int infile, int outfile) {
+  // char header[PROCESS_BODY_SIZE];
+  int serv_status;
+  char resourceName[PROCESS_BODY_SIZE];
+  int len;
+  char buff[PROCESS_BODY_SIZE];
+
+
   struct timeval tv;
 
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
   if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
 
+  int msgs = 0;
   while(1)
   {
     tv.tv_usec = 200;
@@ -246,7 +255,23 @@ void forwardResponse(int infile, int outfile) {
     if (rdCount <= 0) {
       break;
     }
+    // grab the header of the server response to update load balance values
+    if (msgs == 0) {
+      sscanf(readbuff, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n", 
+          &serv_status, resourceName, &len, buff, buff, buff, buff, buff, buff);
+
+      if (serv_status != 200) {
+        server_errors[currentChosenServer]++;
+      }
+      server_entries[currentChosenServer]++;
+      
+      // strcpy(header, readbuff);
+      // printf("header %s\n ", header);
+      printf("[!process] %d <%u><%u>\n", server_pool[currentChosenServer], server_errors[currentChosenServer], server_entries[currentChosenServer]);
+    }
+
     write(outfile, readbuff, rdCount);
+    msgs++;
   }
   free(readbuff);
   readbuff = NULL;
@@ -263,25 +288,53 @@ void relayRequesttoServer(char* header, size_t len, int dst_fd, int src_fd) {
 }
 
 
+// returns the index of the server to load balance on. IE: server_pool[chosen]
+int loadBalance() {
+  int chosen = currentChosenServer;
+  unsigned int lowestTotal = server_entries[currentChosenServer];
+
+  for (int i = 0 ; i < servers; i++) {
+    // Response code ! 200 == skip server set to offline
+    if (server_status[i] == 0) {
+      continue;
+    }
+
+    // Prioritize least requested server
+    if (server_entries[i] < lowestTotal) {
+      lowestTotal = server_entries[i];
+      chosen = i;
+    }
+
+    // Break tie w/ lowest errors
+    else if (server_entries[i] == lowestTotal) {
+      if (server_errors[i] < server_errors[chosen]) {
+        chosen = i;
+      }
+    }
+    // printf("[!loadbalance] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
+  }
+  // printf("choosing in load balance = %d\n", chosen);
+  return chosen;
+}
+
+
 // Querie all servers
+// Load balances the current server to use. Returns that index.
 int healthCheckServers() {
 
   // Timeout
   struct timeval tv;
 
+  // int chosen = -1;
   char healthRequest[HEADER_SIZE];
   char buff[HEADER_SIZE];
-  int len;
   int serv_status;
 
-  unsigned int lowestTotal = currentChosenServer;
-  int chosen = -1;
-
-  // int i= 0;
-  // while(server_pool[i]) {
-  //   printf("       old %d %d\n", server_errors[i], server_entries[i]);
-  //   i++;
-  // }
+  int i= 0;
+  while(server_pool[i]) {
+    printf("       old %d %d\n", server_errors[i], server_entries[i]);
+    i++;
+  }
 
   for (int i = 0 ; i < servers; i++) {
 
@@ -325,41 +378,24 @@ int healthCheckServers() {
     }
     // One complete message
     else {
-      sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
-          &serv_status, buff, &len, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
+      sscanf(healthStatus, "HTTP/1.1 %d %s\r\nContent-Length: %s\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n%u\n%u\n", 
+          &serv_status, buff, buff, buff, buff, buff, buff, buff, buff, &server_errors[i], &server_entries[i]);
     }
-    
+
     free(healthStatus);
     healthStatus = NULL;
 
-    printf("[!] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
-
-    // Response code ! 200 == skip server set to offline
     if (serv_status != 200) {
+      server_status[i] = 0;
       continue;
     }
 
-    // Prioritize least requested server
-    if (server_entries[i] < lowestTotal) {
-      lowestTotal = server_entries[i];
-      chosen = i;
-    }
-
-    // Break tie w/ lowest errors
-    else if (server_entries[i] == lowestTotal) {
-      if (server_errors[i] < server_errors[chosen]) {
-        chosen = i;
-      }
-    }
+    printf("[!healthck] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
     close(serverfd);
   }
 
-  // all servers offline cannot process request via forwarding
-  if (chosen < 0) {
-    return chosen;
-  }
-
-  return server_pool[chosen];
+  // otherwise load balance based on new healthcheck logs
+  return loadBalance();
 }
 
 
@@ -400,6 +436,13 @@ int healthCheckServers() {
 // }
 
 
+// void getCache(rObj->resource, server_port){
+
+
+
+// }
+
+
 void ProcessClientRequest(char *c_request, int connfd) {
   int serverfd = 0;
   struct ClientRequest rObj = {0}; //reset object
@@ -410,10 +453,15 @@ void ProcessClientRequest(char *c_request, int connfd) {
   // Initiate Healthcheck
   if (responses % healthFrequency == 0) {
     currentChosenServer = healthCheckServers();
-    printf("chosen server port = %d\n", currentChosenServer);
   }
+  // load balance between healthchecks
+  else {
+    currentChosenServer = loadBalance();
+  }
+  printf("chosen server port = %d\n\n", server_pool[currentChosenServer]);
+
   responses++;
-  int server_port = currentChosenServer;
+  int server_port = server_pool[currentChosenServer];
   pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseClientHeader(c_request, &rObj);
@@ -446,8 +494,9 @@ void ProcessClientRequest(char *c_request, int connfd) {
     if ((serverfd = create_client_socket(server_port)) > 0)
     {
       // if (cache_enabled) {
-      //   // check whether to cache based on file size
-      //   //    replacing oldest cache once cache is full
+        // getCache(rObj->resource, server_port);
+        // check whether to cache based on file size
+        //    replacing oldest cache once cache is full
       // }
       // All cases (cache and not cache)
       relayRequesttoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
@@ -552,9 +601,10 @@ int main(int argc, char *argv[]) {
   
   // Get non-option server ports
   server_pool    = (uint16_t *) malloc ((argc-2) * sizeof (uint16_t));
+  server_status  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
   server_errors  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
   server_entries = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
-  if (!server_pool || !server_errors || !server_entries) {
+  if (!server_pool || !server_status || !server_errors || !server_entries) {
     fprintf(stderr, "Bad malloc!"); return -1;
   }
 
@@ -589,6 +639,7 @@ int main(int argc, char *argv[]) {
       else {
         server_port = strtouint16(argv[optind++]);
         server_pool   [servers] = server_port;
+        server_status[servers]  = 1;  // start online
         server_errors [servers] = 0;  // bad logs
         server_entries[servers] = 0;  // total logs
         servers++;
@@ -620,7 +671,8 @@ int main(int argc, char *argv[]) {
 // CLEAN UP
 //=========================================================================================
 
-  free(server_errors );
+  free(server_errors);
+  free(server_status);
   free(server_entries);
   free(server_pool);
 
@@ -633,7 +685,7 @@ int main(int argc, char *argv[]) {
   free(cache_directory);
   cache_directory = NULL;
 
-  server_errors = server_entries = NULL;
+  server_errors = server_status = server_entries = NULL;
   server_pool = NULL;
 
   return EXIT_SUCCESS;
