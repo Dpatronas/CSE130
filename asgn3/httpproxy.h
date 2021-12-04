@@ -45,7 +45,7 @@ struct ClientRequest {
   int status_code;      // Code for Response
   int client_socket;    // Client connection fd
 
-  int method;           // Only GET requests will be acknowledged
+  char method [300];    // Only GET requests will be acknowledged
   char resource [300];
   char version [300];   // ex: HTTP/1.1
   char hostname [300];  // ex: localhost

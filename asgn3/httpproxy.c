@@ -53,6 +53,7 @@ int isBadRequest(struct ClientRequest * rObj) {
 
   // Check version matches protocol
   if (!(strncmp(rObj->version,"HTTP/1.1",8) == 0)) {
+    printf("rObj->version = %s\n", rObj->version);
     return 1;
   }
   // Check file name begins with backslash
@@ -63,7 +64,7 @@ int isBadRequest(struct ClientRequest * rObj) {
   memmove(rObj->resource, rObj->resource+1, strlen(rObj->resource));  
   
   // Check file length
-  if (strlen(rObj->resource) > 19) {  
+  if (strlen(rObj->resource) > 19) {
     return 1;
   }
   // Check file name characters is valid
@@ -81,6 +82,9 @@ int isBadRequest(struct ClientRequest * rObj) {
 int ParseClientHeader(char * c_request, struct ClientRequest * rObj) {
 
   char * tok = strtok (c_request, "\r\n");
+  sscanf(c_request, "%s %s %s", rObj->method, rObj->resource, rObj->version);
+  c_request += strlen(tok) + strlen("\r\n");      // manually set index
+
   while (tok != NULL)
   {
     c_request += strlen(tok) + strlen("\r\n");      // manually set index
@@ -105,8 +109,7 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
 
   // Lines expected
   enum {
-    _GET = 0,
-    _HOST, 
+    _HOST = 0,
 
     PARAMTOTAL,
   };
@@ -114,7 +117,6 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
 
   // Map enum to string
   char* types[PARAMTOTAL] = {
-    [_GET] =            "GET",
     [_HOST] =           "Host:",
   };
 
@@ -144,12 +146,6 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
   }
 
   switch(param_type) {
-    case _GET: {  // todo error check that param_count is within range of expectation..
-      rObj->method = _GET_;
-      strcpy(rObj->resource, params[0]); 
-      strcpy(rObj->version, params[1]);
-      break;
-    }
    case _HOST: {
       //Additional parameter(s) than expected indicate spaces on hostvalue
       if (param_count > 2) { 
@@ -157,7 +153,6 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
       }
       tok = strtok(params[0], ":"); 
       strcpy(rObj->hostname, tok); //localhost
-
       tok = strtok (NULL, " ");
       strcpy(rObj->hostvalue, tok); //8080
       break;
@@ -424,6 +419,7 @@ void ProcessClientRequest(char *c_request, int connfd) {
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
+
   pthread_mutex_lock(&mtx);
 
   // Initiate Healthcheck
@@ -456,7 +452,6 @@ void ProcessClientRequest(char *c_request, int connfd) {
   pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseClientHeader(c_request, &rObj);
-
   if (parse_status < 0 || isBadRequest(&rObj)) {
     rObj.status_code = 400;
     ProxyResponse(rObj);
@@ -464,24 +459,24 @@ void ProcessClientRequest(char *c_request, int connfd) {
   }
 
   // All servers are down / unresponsive
-  if (currentChosenServer < 0) {
+  else if (currentChosenServer < 0) {
     rObj.status_code = 500;
     ProxyResponse(rObj);
     return;
   }
 
   // Fulfill GET Request
-  if ((rObj.method == _GET_)) {
+  else if (strncmp(rObj.method,"GET",3)==0) {
     serverfd = create_client_socket(server_pool[currentChosenServer]);
     relayRequesttoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
     close(serverfd);
   }
-
   else {
     rObj.status_code = 501;
     ProxyResponse(rObj);
     return;
   }
+
 }
 
 
