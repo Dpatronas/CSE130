@@ -39,8 +39,8 @@ static uint32_t * server_status;    // 0 == offline for balancing
 static uint32_t * server_errors;    // bad logs
 static uint32_t * server_entries;   // total logs
 
-static int servers = 0;             // # of server
-static int currentChosenServer = 0; // Server index to port forward
+static int total_servers = 0;             // # of server
+static int currentChosenServer = 0;       // Server index to port forward
 
 static uint32_t cache_capacity = 3;   // 0 means no caching
 static uint32_t max_file_size = 1024; // 0 means no caching
@@ -290,10 +290,10 @@ void relayRequesttoServer(char* header, size_t len, int dst_fd, int src_fd) {
 
 // returns the index of the server to load balance on. IE: server_pool[chosen]
 int loadBalance() {
-  int chosen = currentChosenServer;
-  unsigned int lowestTotal = server_entries[currentChosenServer];
+  int chosen = -1;
+  unsigned int lowestTotal = 5000;
 
-  for (int i = 0 ; i < servers; i++) {
+  for (int i = 0 ; i < total_servers; i++) {
     // Response code ! 200 == skip server set to offline
     if (server_status[i] == 0) {
       continue;
@@ -311,9 +311,8 @@ int loadBalance() {
         chosen = i;
       }
     }
-    // printf("[!loadbalance] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
   }
-  // printf("choosing in load balance = %d\n", chosen);
+  printf("balancing = %d\n\n", server_pool[chosen]);
   return chosen;
 }
 
@@ -336,7 +335,7 @@ int healthCheckServers() {
     i++;
   }
 
-  for (int i = 0 ; i < servers; i++) {
+  for (int i = 0 ; i < total_servers; i++) {
 
     memset(healthRequest,0,sizeof (healthRequest));
     memset(buff, 0, sizeof (buff));
@@ -344,8 +343,10 @@ int healthCheckServers() {
     sprintf(healthRequest, "GET /healthcheck HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", server_pool[i]);
 
     int serverfd = create_client_socket(server_pool[i]);
-    // skip server not connecting
+
+    // set offline, skip
     if (serverfd < 0) {
+      server_status[i] = 0;
       continue;
     }
 
@@ -364,7 +365,6 @@ int healthCheckServers() {
       int rdCount = read(serverfd, healthStatus, PROCESS_BODY_SIZE);
       
       if (rdCount <= 0) {
-        // printf("Exitting w/ condition rdCount= %d\n", rdCount);
         close(serverfd);
         break;
       }
@@ -385,66 +385,27 @@ int healthCheckServers() {
     free(healthStatus);
     healthStatus = NULL;
 
+    //set offline
     if (serv_status != 200) {
       server_status[i] = 0;
       continue;
+    } // set online
+    else {
+      server_status[i] = 1;
     }
 
     printf("[!healthck] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
     close(serverfd);
   }
-
   // otherwise load balance based on new healthcheck logs
   return loadBalance();
 }
 
 
-// // Call head and get response
-// char * ServerHead(char * resource, int server_port) {
-
-//   char headRequest[HEADER_SIZE];
-//   sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resource, server_port);
-
-//   int serverfd = create_client_socket(server_port);
-
-//   // Request health check from the current server
-//   int s = send(serverfd, headRequest, strlen(headRequest), 0);
-//   memset(headRequest,0, sizeof HEADER_SIZE);
-//   int rdCount = read(serverfd, headRequest, HEADER_SIZE);
-  
-//   close(serverfd);
-
-//   return headRequest;
-// }
-
-
-// int checkCache(char * resource, int server_port) {
-//   int found = 0;
-
-//   // Check the name exists in cache
-//   for (int i = 0; i < cache_capacity; i++) {
-//     if (strcmp(cache_directory[i]->name, resource) == 0) {
-//       found = 1;
-//     }
-//   }
-//   if (found == 0) {
-//     return -1;
-//   }
-//   // Check that the file is recent
-//   char server_Age[1024];
-//   strcpy(server_Age, ServerHead(resource));
-// }
-
-
-// void getCache(rObj->resource, server_port){
-
-
-
-// }
-
-
 void ProcessClientRequest(char *c_request, int connfd) {
-  int serverfd = 0;
+  int serverfd = -1;
+  int failed_servers = 0;
+
   struct ClientRequest rObj = {0}; //reset object
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
@@ -453,13 +414,40 @@ void ProcessClientRequest(char *c_request, int connfd) {
   // Initiate Healthcheck
   if (responses % healthFrequency == 0) {
     currentChosenServer = healthCheckServers();
+
+    if (currentChosenServer < 0) {
+      rObj.status_code = 500;
+      ProxyResponse(rObj);
+      return;
+     }
   }
   // load balance between healthchecks
   else {
     currentChosenServer = loadBalance();
-  }
-  printf("chosen server port = %d\n\n", server_pool[currentChosenServer]);
+    if (currentChosenServer < 0) {
+        rObj.status_code = 500;
+        ProxyResponse(rObj);
+        return;
+    }
+    // Determine if the server is alive between healthchecks
+    // WHAT IF THE SERVERFD !<0 ? opening a port..
+    while((serverfd = create_client_socket(server_pool[currentChosenServer])) < 0) {
+      // port fails to create. Set it to offline.
+      server_status[currentChosenServer] = 0;
+      failed_servers++;
+      // Choose a new server from online list
+      currentChosenServer = loadBalance();
 
+      if (failed_servers == total_servers) {
+        rObj.status_code = 500;
+        ProxyResponse(rObj);
+      }
+    }
+    // close the server that is online that was openened
+    close(serverfd);
+  }
+
+  printf("chosen server port = %d\n\n", server_pool[currentChosenServer]);
   responses++;
   int server_port = server_pool[currentChosenServer];
   pthread_mutex_unlock(&mtx);
@@ -481,27 +469,9 @@ void ProcessClientRequest(char *c_request, int connfd) {
 
   // Fulfill GET Request
   if ((rObj.method == _GET_)) {
-
-    // Check file name in cache
-    // if (cache_enabled)
-    // {
-    //   if ((int cache_fd = checkCache(rObj->resource, server_port)) > 0) {
-    //     forwardResponse(connfd, cache_fd);
-    //     return;
-    //   }
-    // }
-    // Otherwise get the file from server and store file. in cache
-    if ((serverfd = create_client_socket(server_port)) > 0)
-    {
-      // if (cache_enabled) {
-        // getCache(rObj->resource, server_port);
-        // check whether to cache based on file size
-        //    replacing oldest cache once cache is full
-      // }
-      // All cases (cache and not cache)
-      relayRequesttoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
-      close(serverfd);
-    }
+    serverfd = create_client_socket(server_pool[currentChosenServer]);
+    relayRequesttoServer(rObj.c_request, strlen(rObj.c_request), serverfd, connfd);
+    close(serverfd);
   }
 
   else {
@@ -638,17 +608,17 @@ int main(int argc, char *argv[]) {
       }
       else {
         server_port = strtouint16(argv[optind++]);
-        server_pool   [servers] = server_port;
-        server_status[servers]  = 1;  // start online
-        server_errors [servers] = 0;  // bad logs
-        server_entries[servers] = 0;  // total logs
-        servers++;
+        server_pool   [total_servers] = server_port;
+        server_status [total_servers]  = 1;  // start online
+        server_errors [total_servers] = 0;  // bad logs
+        server_entries[total_servers] = 0;  // total logs
+        total_servers++;
       }
     }
   }
 
   // Fail if no server port is provided
-  if (servers == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }
+  if (total_servers == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }
 
   // create cache memory
   if (cache_capacity > 0 && max_file_size > 0) {
