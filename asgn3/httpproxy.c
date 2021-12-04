@@ -230,6 +230,13 @@ void ProxyResponse(struct ClientRequest rObj) {
 }
 
 
+// Everyone is offline until next healthcheck
+void internalServerError(struct ClientRequest rObj) {
+    rObj.status_code = 500;
+    responses++;
+    ProxyResponse(rObj);
+}
+
 
 // Process server response to client
 void forwardResponse(int infile, int outfile) {
@@ -289,12 +296,12 @@ void relayRequesttoServer(char* header, size_t len, int dst_fd, int src_fd) {
 
 
 // returns the index of the server to load balance on. IE: server_pool[chosen]
+// If no server is online, return -1.
 int loadBalance() {
   int chosen = -1;
   unsigned int lowestTotal = 5000;
-
   for (int i = 0 ; i < total_servers; i++) {
-    // Response code ! 200 == skip server set to offline
+    //skip server set to offline
     if (server_status[i] == 0) {
       continue;
     }
@@ -312,7 +319,15 @@ int loadBalance() {
       }
     }
   }
-  printf("balancing = %d\n\n", server_pool[chosen]);
+
+  if (chosen < 0) {
+    printf("all servers offline\n");
+  }
+
+  else {
+    printf("balancing = %d\n\n", server_pool[chosen]);
+  }
+
   return chosen;
 }
 
@@ -323,8 +338,6 @@ int healthCheckServers() {
 
   // Timeout
   struct timeval tv;
-
-  // int chosen = -1;
   char healthRequest[HEADER_SIZE];
   char buff[HEADER_SIZE];
   int serv_status;
@@ -389,7 +402,8 @@ int healthCheckServers() {
     if (serv_status != 200) {
       server_status[i] = 0;
       continue;
-    } // set online
+    } 
+    // set online
     else {
       server_status[i] = 1;
     }
@@ -404,52 +418,41 @@ int healthCheckServers() {
 
 void ProcessClientRequest(char *c_request, int connfd) {
   int serverfd = -1;
-  int failed_servers = 0;
+  int skip = 0;
 
   struct ClientRequest rObj = {0}; //reset object
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
   pthread_mutex_lock(&mtx);
+
   // Initiate Healthcheck
   if (responses % healthFrequency == 0) {
-    currentChosenServer = healthCheckServers();
-
-    if (currentChosenServer < 0) {
-      rObj.status_code = 500;
-      ProxyResponse(rObj);
-      return;
-     }
+    currentChosenServer = healthCheckServers(); 
   }
   // load balance between healthchecks
   else {
     currentChosenServer = loadBalance();
     if (currentChosenServer < 0) {
-        rObj.status_code = 500;
-        ProxyResponse(rObj);
-        return;
+        skip = 1;
     }
-    // Determine if the server is alive between healthchecks
-    // WHAT IF THE SERVERFD !<0 ? opening a port..
-    while((serverfd = create_client_socket(server_pool[currentChosenServer])) < 0) {
-      // port fails to create. Set it to offline.
-      server_status[currentChosenServer] = 0;
-      failed_servers++;
-      // Choose a new server from online list
-      currentChosenServer = loadBalance();
+    else {
+      // Determine if the server is alive between healthchecks
+      while((!skip) && (serverfd = create_client_socket(server_pool[currentChosenServer])) < 0) {
+        server_status[currentChosenServer] = 0; // port fails to create. Set it to offline.
+        currentChosenServer = loadBalance();    // Choose a new server from online list
 
-      if (failed_servers == total_servers) {
-        rObj.status_code = 500;
-        ProxyResponse(rObj);
+        //break if all servers offline
+        if (currentChosenServer < 0) {
+          skip = 1;
+        }
       }
+      // IF/ WHEN serverfd > 0. Close the server that is online that was openened from while loop
+      close(serverfd);
     }
-    // close the server that is online that was openened
-    close(serverfd);
   }
-
   printf("chosen server port = %d\n\n", server_pool[currentChosenServer]);
   responses++;
-  int server_port = server_pool[currentChosenServer];
   pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseClientHeader(c_request, &rObj);
@@ -461,7 +464,7 @@ void ProcessClientRequest(char *c_request, int connfd) {
   }
 
   // All servers are down / unresponsive
-  if (server_port < 0) {
+  if (currentChosenServer < 0) {
     rObj.status_code = 500;
     ProxyResponse(rObj);
     return;
