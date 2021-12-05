@@ -1,16 +1,20 @@
 // Despina Patronas CSE130 Fall 2021 asgn3
+// #define _XOPEN_SOURCE 700
+#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
+
+#include <time.h> 
 
 #include <stdlib.h>
 #include <stdint.h>
-#include <string.h>     // strtok(), strstr(), strncpy(), strlen()
-#include <stdio.h>      // fprintf()
-#include <err.h>        // warn()
-#include <errno.h>      // check warn codes
-#include <fcntl.h>      // open()
-#include <unistd.h>     // close(), write()
-#include <ctype.h>      // isalnum()
-#include <sys/stat.h>   // stat()
-#include <sys/file.h>   // flock()
+#include <string.h>
+#include <stdio.h>
+#include <err.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <ctype.h> 
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <getopt.h>
 // multithreading libraries
@@ -25,54 +29,49 @@
 #include "queue.h"
 #include "httpproxy.h"
 
-#define GETOPTIONS "N:R:s:m:"  // optional CMD line args
+#define GETOPTIONS "N:R:s:m:"  // CLI
 #define MIN(x, y) ( ( (x) < (y) ) ? (x) : (y) )
 
 extern int errno;
 struct stat st;
 
-static int responses = 0;                         // # of responses fulfilled 
-pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;  // guard the shared resources (healthchecks and responses)
+static int responses = 0; // # running total req. fulfilled
+pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
 
-static uint16_t * server_pool;      // holds server ports
-static uint32_t * server_status;    // 0 == offline. 1 == online (for balancing when server(s) fail)
-static uint32_t * server_errors;    // bad logs
-static uint32_t * server_entries;   // total logs
+static uint16_t * server_pool;
+static uint32_t * server_status;    // 0 == offline. 1 == online
+static uint32_t * server_errors;
+static uint32_t * server_entries;
 
-static int total_servers = 0;             // # of server
-static int currentChosenServer = 0;       // Server index to port forward
-static int healthFrequency = 5;           // # of times to healthcheck servers
+static int total_servers = 0; 
+static int currChosenServer = 0;     // Server index to port forward
+static int healthFrequency = 5;         // # to health check
 
-static uint32_t cache_capacity = 3;   // 0 means no caching
-static uint32_t max_cache_size = 1024; // 0 means no caching
-static int cache_enabled = 1;         // default.cache is enabled
+static uint32_t cache_capacity = 3;     // 0 to disable
+static uint32_t max_cache_size = 1024;  // 0 to disable
+static int cache_enabled = 1;           // default enabled
 
-static uint32_t cached_files = 0;          // keeps incrementing for each new cached file
+static uint32_t cached_files = 0;       // running total
 
-// Determines which index of cache to override for storing. FIFO
+// Determines which index of cache to override for storing.FIFO
 #define CACHEINDX ((cached_files) % (cache_capacity))
 
 
-// Returns 1 if request field is bad
+// Returns 1 for 400 code
 int isBadRequest(struct ClientRequest * rObj) {
 
-  // Check version matches protocol
   if (!(strncmp(rObj->version,"HTTP/1.1",8) == 0)) {
-    printf("rObj->version = %s\n", rObj->version);
     return 1;
   }
-  // Check file name begins with backslash
   if (!(strncmp(rObj->resource, "//", 1) == 0)) {
     return 1;
   }
-  // Remove file name backslash
   memmove(rObj->resource, rObj->resource+1, strlen(rObj->resource));  
   
-  // Check file length
   if (strlen(rObj->resource) > 19) {
     return 1;
   }
-  // Check file name characters is valid
+  // Check characters valid
   for (size_t i = 0; i < strlen(rObj->resource); i++) {
     if ( !(isalnum(rObj->resource[i])) && (rObj->resource[i] != '_') && (rObj->resource[i] != '.')) {
       return 1;
@@ -82,18 +81,17 @@ int isBadRequest(struct ClientRequest * rObj) {
 }
 
 
-// Parse request header (line by line)
 // Returns -1 if header was not processed due to bad header request.
-int ParseClientHeader(char * c_request, struct ClientRequest * rObj) {
+int ParseHeader(char * c_request, struct ClientRequest * rObj) {
 
   char * tok = strtok (c_request, "\r\n");
   sscanf(c_request, "%s %s %s", rObj->method, rObj->resource, rObj->version);
-  c_request += strlen(tok) + strlen("\r\n");      // manually set index
+  c_request += strlen(tok) + strlen("\r\n");
 
   while (tok != NULL)
   {
-    c_request += strlen(tok) + strlen("\r\n");      // manually set index
-    int parse_status = ParseClientLine(tok, rObj);  // return status of parseLine
+    c_request += strlen(tok) + strlen("\r\n");
+    int parse_status = ParseClientLine(tok, rObj);
     if (parse_status < 0) {
       return -1;
     }
@@ -103,9 +101,7 @@ int ParseClientHeader(char * c_request, struct ClientRequest * rObj) {
 }
 
 
-// Parse line of request header (from Client)
-//    - Populate the message object fields
-//    - returns -1 if header fields not accepted.
+// Returns -1 for bad hostname
 int ParseClientLine(char * line, struct ClientRequest * rObj) {
   int param_count = 0;
   int param_type = -1;
@@ -115,18 +111,17 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
   // Lines expected
   enum {
     _HOST = 0,
-
     PARAMTOTAL,
   };
   const int type_count = PARAMTOTAL;
 
   // Map enum to string
   char* types[PARAMTOTAL] = {
-    [_HOST] =           "Host:",
+    [_HOST] =     "Host:",
   };
 
   char * tok = NULL;
-  tok = strtok_r (line, " ", &indx); // gets first parameter of line
+  tok = strtok_r (line, " ", &indx);
 
   while (tok != NULL) 
   {
@@ -151,8 +146,7 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
   }
 
   switch(param_type) {
-   case _HOST: {
-      //Additional parameter(s) than expected indicate spaces on hostvalue
+    case _HOST: {
       if (param_count > 2) { 
         return -1;
       }
@@ -169,8 +163,6 @@ int ParseClientLine(char * line, struct ClientRequest * rObj) {
   return 1;
 }
 
-
-// Converts a string to an 16 bits unsigned integer.
 uint16_t strtouint16(char number[]) {
   char *last;
   long num = strtol(number, &last, 10);
@@ -180,8 +172,6 @@ uint16_t strtouint16(char number[]) {
   return num;
 }
 
-
-// Proxy Server to listen for Client connections. Creates socket, returns fd of client
 int create_listen_socket(uint16_t port) {
   int listenfd = socket(AF_INET, SOCK_STREAM, 0);
   if (listenfd < 0) { err(EXIT_FAILURE, "socket error"); }
@@ -197,7 +187,6 @@ int create_listen_socket(uint16_t port) {
   return listenfd;
 }
 
-// Proxy Server to connect to other Servers. Creates socket, returns fd of Server
 int create_client_socket(uint16_t port) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   if (fd < 0) { err(EXIT_FAILURE, "socket error"); } 
@@ -213,14 +202,10 @@ int create_client_socket(uint16_t port) {
 }
 
 
-// Proxy Responds to Client for bad status codes 400 and 501.
-// If Proxy has most recent file in cache, it will respond with 200
-// Note: All other responses to client are done via server forwarding
+// Proxy Responds w/ 400 and 501.
 void ProxyResponse(struct ClientRequest rObj) {
 
   char response[HEADER_SIZE];
-
-  // Bad request.
   int slen = strlen(Status(rObj.status_code))+1;
 
   sprintf(response, "HTTP/1.1 %d %s\r\nContent-Length: %d\r\n\r\n%s\n", 
@@ -230,7 +215,7 @@ void ProxyResponse(struct ClientRequest rObj) {
 }
 
 
-// Everyone is offline until next healthcheck
+// Everyone is offline
 void internalServerError(struct ClientRequest rObj) {
     rObj.status_code = 500;
     responses++;
@@ -238,16 +223,15 @@ void internalServerError(struct ClientRequest rObj) {
 }
 
 
-// Process server response to client
 void forwardResponse(int sourcefd, int destfd, char * resourcename) {
-  int serv_status;
+  int serv_status = 0;
+  uint32_t content_len = 0;
   char resourceName[PROCESS_BODY_SIZE];
-  uint32_t content_len;
-  char buff[PROCESS_BODY_SIZE];
+
   struct timeval tv2;
-
   int rd_indx = 0;
-
+  int cached = 0;
+  
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
   if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
 
@@ -262,66 +246,70 @@ void forwardResponse(int sourcefd, int destfd, char * resourcename) {
       break;
     }
 
-    // Header of the server response
+    // Header
     if (msgs == 0) {
-      sscanf(readbuff, "HTTP/1.1 %d %s\r\nContent-Length: %u\r\nLast-Modified: %s %s %s %s %s %s\r\n\r\n", 
-          &serv_status, resourceName, &content_len, buff, buff, buff, buff, buff, buff);
+      sscanf(readbuff, "HTTP/1.1 %d %s\r\nContent-Length: %u\r\n", 
+          &serv_status, resourceName, &content_len);
 
-      // memcpy(cache_directory[CACHEINDX]->age_in_cache, source ...);
+      char * tmp  = strstr(readbuff, "Last-Modified:");
 
       if (serv_status != 200) {
-        server_errors[currentChosenServer]++;
+        server_errors[currChosenServer]++;
       }
-      server_entries[currentChosenServer]++;
+      server_entries[currChosenServer]++;
       
-      // If caching is enabled (and valid requirements, store file in cache)
       if ((cache_enabled) && (serv_status == 200) && (content_len <= max_cache_size)) {
-        // Store Header                   [dest.+ offset , source, #elements * sizeof(element)]
+        cached = 1;
+
+        memset(cache_directory[CACHEINDX]->file_contents, 0, sizeof(char) * max_cache_size * HEADER_SIZE);
+        memset(cache_directory[CACHEINDX]->file_name,     0, sizeof(char) * HEADER_SIZE);
+        memset(cache_directory[CACHEINDX]->age_in_cache,  0, sizeof(char) * HEADER_SIZE);
+        cache_directory[CACHEINDX]->file_size = 0;
+
+        // Store Header
         memcpy(cache_directory[CACHEINDX]->file_contents + rd_indx, readbuff, rdCount * sizeof(char)); 
         memcpy(cache_directory[CACHEINDX]->file_name, resourcename, strlen(resourcename) * sizeof(char));
+        memcpy(cache_directory[CACHEINDX]->age_in_cache, tmp, 40 * sizeof(char));
       }
-
     }
-    // Body Messages of server response
+    // Body
     else {
       if ((cache_enabled) && (serv_status == 200) && (content_len <= max_cache_size)) {
         memcpy(cache_directory[CACHEINDX]->file_contents + rd_indx, readbuff, rdCount * sizeof(char)); 
       }
     }
 
-    // Increment amount read. Final value is the caches file_size
     rd_indx += rdCount;
-    // Sends read buffer data to destination
-    write(destfd, readbuff, rdCount);
+    write(destfd, readbuff, rdCount); // Sends data to destination
     msgs++;
   }
 
-  cache_directory[CACHEINDX]->file_size = rd_indx;  // Set the length of the cache message
-  // printf("cached %d NAME = %s\nSIZE = %d\nCONTENTS:\n%s\n", 
-    // cached_files, cache_directory[CACHEINDX]->file_name, cache_directory[CACHEINDX]->file_size, cache_directory[CACHEINDX]->file_contents);
+  if (cached) {
+    cache_directory[CACHEINDX]->file_size = rd_indx;
+    // printf("Cache_directory[%d]\nNAME = %s\nSIZE = %d\nMODIFIED = %s\n", 
+      // CACHEINDX, cache_directory[CACHEINDX]->file_name, cache_directory[CACHEINDX]->file_size, cache_directory[CACHEINDX]->age_in_cache);
 
-  // Done storing the cache object entirely
-  cached_files++;                                   // Increment will give new cacheindx
+    // Done storing the cache object
+    cached_files++; // Increment for FIFO
+  }
 
   free(readbuff);
   readbuff = NULL;
 }
 
 
-// Forward Server response to client
 void relayRequesttoServer(char* header, char *resourcename, size_t len, int dst_fd, int src_fd) {
-  // send a request
+  // send header req.
   int sent = send(dst_fd, header, len, 0);
   if (sent > 0)
   {
-    // process response
     forwardResponse(dst_fd, src_fd, resourcename);
   }
 }
 
 
-// returns the index of the server to load balance on. IE: server_pool[chosen]
-// If no server is online, return -1.
+// Returns index of server to load balance on
+// if all offline return -1
 int loadBalance() {
   int chosen = -1;
   unsigned int lowestTotal = 1234567;  //some arbitrarily large number
@@ -348,17 +336,12 @@ int loadBalance() {
   if (chosen < 0) {
     printf("all servers offline\n");
   }
-
-  else {
-    printf("balancing = %d\n\n", server_pool[chosen]);
-  }
-
   return chosen;
 }
 
 
-// Querie all servers
-// Load balances the current server to use. Returns that index.
+// Querie all servers & Load balances the current server to use. 
+// Returns chosen server index or -1 (all offline)
 int healthCheckServers() {
 
   char healthRequest[HEADER_SIZE];
@@ -367,7 +350,7 @@ int healthCheckServers() {
 
   int i= 0;
   while(server_pool[i]) {
-    printf("       old %d %d\n", server_errors[i], server_entries[i]);
+    // printf("       old %d %d\n", server_errors[i], server_entries[i]);
     i++;
   }
 
@@ -375,6 +358,7 @@ int healthCheckServers() {
 
     memset(healthRequest,0,sizeof (healthRequest));
     memset(buff, 0, sizeof (buff));
+    char * healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
 
     sprintf(healthRequest, "GET /healthcheck HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", server_pool[i]);
 
@@ -386,13 +370,9 @@ int healthCheckServers() {
       continue;
     }
 
-    // Request health check from the current server
     int s = send(serverfd, healthRequest, strlen(healthRequest), 0);
     if (s < 0) { continue;}
-    
-    char * healthStatus = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
 
-    // muliple recvs use timeout to end recv loop
     int msgs = 0;
     char * pch;
 
@@ -404,7 +384,7 @@ int healthCheckServers() {
       }
       
       if (rdCount <= 0) {
-        printf("Exitting w/ condition rdCount= %d\n", rdCount);
+        // printf("Exitting w/ condition rdCount= %d\n", rdCount);
         close(serverfd);
         break;
       }
@@ -425,21 +405,65 @@ int healthCheckServers() {
     free(healthStatus);
     healthStatus = NULL;
 
-    //set offline
     if (serv_status != 200) {
       server_status[i] = 0;
       continue;
     } 
-    // set online
-    else {
+    
+    else {// set online
       server_status[i] = 1;
     }
 
-    printf("[!healthck] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
+    // printf("[!healthck] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
     close(serverfd);
   }
-  // otherwise load balance based on new healthcheck logs
+
+  // balance based on new logs
   return loadBalance();
+}
+
+
+// return the diff of times
+int headReq(char * proxymod, char * resourcename) {
+  struct tm tm1 = {0};
+  struct tm tm2 = {0};
+
+  strptime(proxymod, "%a, %d %b %Y %H:%M:%S", &tm1);
+
+  char headRequest[HEADER_SIZE];
+  sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resourcename, server_pool[currChosenServer]);
+
+  int serverfd = create_client_socket(server_pool[currChosenServer]);
+  if (serverfd < 0) { 
+    server_status[currChosenServer] = 0;
+    return -1;
+  }
+
+  char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
+  char* servMOD = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
+
+
+  int s = send(serverfd, headRequest, strlen(headRequest), 0);
+  if (s < 0) { return -1;}
+
+  int r = read(serverfd, readbuff, PROCESS_BODY_SIZE);
+  if (r < 0) { return -1;}
+  close(serverfd);
+
+  char * tmp  = strstr(readbuff, "Last-Modified:");
+  memcpy(servMOD, tmp, 40 * sizeof(char));
+
+  strptime(proxymod, "%a, %d %b %Y %H:%M:%S", &tm1);
+
+  tm1.tm_isdst= -1;
+  tm2.tm_isdst= -1;
+
+  time_t t1 = mktime(&tm1);
+  time_t t2 = mktime(&tm2);
+
+  // printf("Same or na? %f\n", difftime(t1,t2));
+  return difftime(t1,t2);
+
 }
 
 
@@ -447,51 +471,50 @@ void ProcessClientRequest(char *c_request, int connfd) {
   int serverfd = -1;
   int skip = 0;
 
-  struct ClientRequest rObj = {0}; //reset object
+  struct ClientRequest rObj = {0};
   rObj.client_socket = connfd;
   strcpy(rObj.c_request, c_request);
 
-
   pthread_mutex_lock(&mtx);
 
-  // Initiate Healthcheck
+  // HC
   if (responses % healthFrequency == 0) {
-    currentChosenServer = healthCheckServers(); 
+    currChosenServer = healthCheckServers(); 
   }
-  // load balance between healthchecks
+  // between HC
   else {
-    currentChosenServer = loadBalance();
-    if (currentChosenServer < 0) {
+    currChosenServer = loadBalance();
+    if (currChosenServer < 0) {
         skip = 1;
     }
     else {
-      // Determine if the server is alive between healthchecks
-      while((!skip) && (serverfd = create_client_socket(server_pool[currentChosenServer])) < 0) {
-        server_status[currentChosenServer] = 0; // port fails to create. Set it to offline.
-        currentChosenServer = loadBalance();    // Choose a new server from online list
+      // alive between HC?
+      while((!skip) && (serverfd = create_client_socket(server_pool[currChosenServer])) < 0) {
+        server_status[currChosenServer] = 0; // port offline
+        currChosenServer = loadBalance();    // Choose new online port
 
-        //break if all servers offline
-        if (currentChosenServer < 0) {
+        // all dead
+        if (currChosenServer < 0) {
           skip = 1;
         }
       }
-      // IF/ WHEN serverfd > 0. Close the server that is online that was openened from while loop
       close(serverfd);
     }
   }
-  printf("chosen server port = %d\n\n", server_pool[currentChosenServer]);
+  // printf("Chosen Server = %d\n\n", server_pool[currChosenServer]);
   responses++;
+
   pthread_mutex_unlock(&mtx);
 
-  int parse_status = ParseClientHeader(c_request, &rObj);
+  int parse_status = ParseHeader(c_request, &rObj);
   if (parse_status < 0 || isBadRequest(&rObj)) {
     rObj.status_code = 400;
     ProxyResponse(rObj);
     return;
   }
 
-  // All servers are down / unresponsive
-  else if (currentChosenServer < 0) {
+  // All down / unresponsive
+  else if (currChosenServer < 0) {
     rObj.status_code = 500;
     ProxyResponse(rObj);
     return;
@@ -499,9 +522,26 @@ void ProcessClientRequest(char *c_request, int connfd) {
 
   // Fulfill GET Request
   else if (strncmp(rObj.method,"GET",3)==0) {
-    serverfd = create_client_socket(server_pool[currentChosenServer]);
-    relayRequesttoServer(rObj.c_request, rObj.resource, strlen(rObj.c_request), serverfd, connfd);
-    close(serverfd);
+
+    if (cache_enabled) {
+      for (unsigned int i = 0; i < cache_capacity; i++) {
+        int len = strlen(rObj.resource);
+        if (strncmp(rObj.resource, cache_directory[i]->file_name, len) == 0 ) {
+          // ALSO Check modified dates
+          if (headReq(cache_directory[i]->age_in_cache, rObj.resource) == 0) {
+            // printf("\n[CACHE HIT!] %s\n", rObj.resource);
+            int w = write(rObj.client_socket, cache_directory[i]->file_contents, cache_directory[i]->file_size);
+            // printf("written = %d ", w);
+            return;
+          }
+        }
+      }
+    }
+    // else {
+      serverfd = create_client_socket(server_pool[currChosenServer]);
+      relayRequesttoServer(rObj.c_request, rObj.resource, strlen(rObj.c_request), serverfd, connfd);
+      close(serverfd);
+    // }
   }
   else {
     rObj.status_code = 501;
@@ -539,7 +579,7 @@ void * WorkerThread(void * arg) {
     {
       // printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
-      printf("[Worker %d] JOB DONE \n", ctx->tid);
+      // printf("[Worker %d] JOB DONE \n", ctx->tid);
     }
   }
 
@@ -548,13 +588,10 @@ void * WorkerThread(void * arg) {
 
 
 void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
-  // Initialize Job Queue
   queue_init();
 
-  // Allocate thread pool
   thread_pool = (threadProcess_t **)malloc(sizeof(threadProcess_t*) * threads);
 
-  // Start workers..
   for (int i = 0; i < threads; i++) {
     thread_pool[i] = (threadProcess_t *)malloc(sizeof(threadProcess_t));  // array of structs
 
@@ -572,9 +609,9 @@ void MultiThreadingProcess(uint16_t threads, uint16_t server_port) {
     queue_push(clientfd);
   }
 
-    // Release thread pool
+  // Clean up
   for (int i = 0; i < threads; i++) {
-    pthread_join(*thread_pool[i]->ptr, NULL); // Threads finish work
+    pthread_join(*thread_pool[i]->ptr, NULL);
     free(thread_pool[i]->ptr);
     free(thread_pool[i]);
     thread_pool[i] = NULL;
@@ -598,7 +635,6 @@ int main(int argc, char *argv[]) {
 
   if (argc < 3) { errx(EXIT_FAILURE, "A proxy & server port number is required!"); }
   
-  // Get non-option server ports
   server_pool    = (uint16_t *) malloc ((argc-2) * sizeof (uint16_t));
   server_status  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
   server_errors  = (uint32_t *) malloc ((argc-2) * sizeof (uint32_t));
@@ -607,7 +643,6 @@ int main(int argc, char *argv[]) {
     fprintf(stderr, "Bad malloc!"); return -1;
   }
 
-  // Get opts
   while (optind < argc)
   {
     if ((opt = getopt(argc, argv, GETOPTIONS)) != -1 ) {
@@ -616,15 +651,12 @@ int main(int argc, char *argv[]) {
         case 'N':
           set_Threads = atoi(optarg);
           break;
-        
         case 'R':
           healthFrequency = atoi(optarg);
           break;
-
         case 's':
           cache_capacity = atoi(optarg);
           break;
-
         case 'm':
           max_cache_size = atoi(optarg);
           break;
@@ -646,23 +678,22 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  // Fail if no server port is provided
   if (total_servers == 0) { errx(EXIT_FAILURE, "A server port number is required!"); }
 
-  // Create Cache memory. 
   if (cache_capacity > 0 && max_cache_size > 0) {
     cache_directory = (cache_file **) malloc(sizeof(cache_file) * cache_capacity);  // alloc array of structs
 
     for (unsigned int i = 0; i < cache_capacity; i++) {
       cache_directory[i] = (cache_file *) malloc(sizeof(cache_file));  // alloc each struct
 
-      // note the file contents will hold not only the file body but also the header
       cache_directory[i]->file_contents = (char *) calloc (max_cache_size * HEADER_SIZE, sizeof(char));
-      cache_directory[i]->file_name = (char *) calloc (HEADER_SIZE, sizeof(char));
-      cache_directory[i]->file_size     = -1; //uninitialized
+      cache_directory[i]->file_name     = (char *) calloc (HEADER_SIZE, sizeof(char));
+      cache_directory[i]->age_in_cache  = (char *) calloc (HEADER_SIZE, sizeof(char));
+
+      cache_directory[i]->file_size     = -1;
     }
   }
-  // If both caching variables are 0, caching is disabled
+  // If both variables are 0, disable
   else {
     cache_enabled = 0;
   }

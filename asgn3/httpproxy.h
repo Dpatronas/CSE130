@@ -40,22 +40,6 @@ struct ClientRequest {
 // CACHEING 
 // =====================================================================================
 
-// Months
-typedef enum months {
-  JAN = 0,
-  FEB,
-  MAR,
-  APR,
-  MAY,
-  JUN,
-  JUL,
-  AUG,
-  SEP,
-  OCT,
-  NOV,
-  DEC,
-} months;
-
 typedef struct {
   char * age_in_cache;      // the last-modified age is upon entering cache
   char * file_name;         // the resource file
@@ -72,7 +56,7 @@ static cache_file ** cache_directory;  // ptr to cached files
 
 const char* Status(int code) {
   switch(code) {
-    case 200: return "OK";                    // Response is successful ie: nothing else broke
+    // case 200: return "OK";                    // Response is successful ie: nothing else broke
     case 400: return "Bad Request";           // Request is not valid ie: not parsable
     case 500: return "Internal Server Error"; // Request is valid but cant allocate memory to process
     case 501: return "Not Implemented";       // Request is valid is ok BUT command not valid
