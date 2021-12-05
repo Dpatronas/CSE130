@@ -9,25 +9,6 @@
 #define PROCESS_BODY_SIZE 4096
 
 //=======================================================================================
-// THREADS
-//=======================================================================================
-
-typedef struct {
-  int tid;         // index of thread in thread pool
-  pthread_t * ptr; // thread itself
-} threadProcess_t;
-
-static threadProcess_t ** thread_pool;  // ptr to struct thread pool
-
-enum {
-  THREAD_INITIALZED = 0,
-  THREAD_READY,
-  THREAD_BUSY,
-
-  THREAD_TOT,
-};
-
-//=======================================================================================
 // CLIENT REQUESTS TO PROXY
 //=======================================================================================
 
@@ -58,11 +39,28 @@ struct ClientRequest {
 //=====================================================================================
 // CACHEING 
 // =====================================================================================
+
+// Months
+typedef enum months {
+  JAN = 0,
+  FEB,
+  MAR,
+  APR,
+  MAY,
+  JUN,
+  JUL,
+  AUG,
+  SEP,
+  OCT,
+  NOV,
+  DEC,
+} months;
+
 typedef struct {
-  char * age_in_cache;
-  char * name;
-  char * file_contents;
-  int file_size;
+  char * age_in_cache;      // the last-modified age is upon entering cache
+  char * file_name;         // the resource file
+  char * file_contents;     // includes bytes of the header + body
+  int    file_size;         // total size the cached header + body
 } cache_file;
 
 static cache_file ** cache_directory;  // ptr to cached files
@@ -75,16 +73,32 @@ static cache_file ** cache_directory;  // ptr to cached files
 const char* Status(int code) {
   switch(code) {
     case 200: return "OK";                    // Response is successful ie: nothing else broke
-    // case 201: return "Created";               // Successful PUT resource
     case 400: return "Bad Request";           // Request is not valid ie: not parsable
-    // case 403: return "Forbidden";             // Cannot access valid resource file (for GET)
-    // case 404: return "File Not Found";        // Valid resource name but server cannot find file
     case 500: return "Internal Server Error"; // Request is valid but cant allocate memory to process
     case 501: return "Not Implemented";       // Request is valid is ok BUT command not valid
   }
   return NULL;
 }
 
+
+//=======================================================================================
+// THREADS
+//=======================================================================================
+
+typedef struct {
+  int tid;         // index of thread in thread pool
+  pthread_t * ptr; // thread itself
+} threadProcess_t;
+
+static threadProcess_t ** thread_pool;  // ptr to struct thread pool
+
+enum {
+  THREAD_INITIALZED = 0,
+  THREAD_READY,
+  THREAD_BUSY,
+
+  THREAD_TOT,
+};
 
 //=====================================================================================
 // FUNCTION DEFINITIONS
@@ -122,8 +136,6 @@ int ParseClientLine(char * line, struct ClientRequest * rObj);
 
 // Returns 1 if client request field is bad
 int isBadRequest(struct ClientRequest * rObj);
-
-void forwardResponse(int infile, int outfile);
 
 int healthCheckServers();
 //=====================================================================================
