@@ -531,7 +531,10 @@ void ProcessClientRequest(char *c_request, int connfd) {
           if (headReq(cache_directory[i]->age_in_cache, rObj.resource) == 0) {
             // printf("\n[CACHE HIT!] %s\n", rObj.resource);
             int w = write(rObj.client_socket, cache_directory[i]->file_contents, cache_directory[i]->file_size);
-            // printf("written = %d ", w);
+            if (w < 0) {
+              rObj.status_code = 500;
+              ProxyResponse(rObj);
+            }
             return;
           }
         }
@@ -579,7 +582,7 @@ void * WorkerThread(void * arg) {
     {
       // printf("[Worker %d] Processing connfd_job %d\n", ctx->tid, connfd_job );
       HandleConnection(connfd_job);
-      // printf("[Worker %d] JOB DONE \n", ctx->tid);
+      printf("[Worker %d] JOB DONE \n", ctx->tid);
     }
   }
 
