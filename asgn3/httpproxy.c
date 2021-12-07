@@ -424,7 +424,7 @@ int healthCheckServers() {
 
 
 // return the diff of times from "last modified" for proxy file and server file
-int headReq(char * proxyMod, char * resourcename, int server) {
+int headReq(char * proxyMod, char * resourcename) {
   int ret = -1;
 
   struct tm tm1 = {0};
