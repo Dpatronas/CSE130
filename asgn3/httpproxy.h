@@ -121,4 +121,5 @@ int ParseClientLine(char * line, struct ClientRequest * rObj);
 // Returns 1 if client request field is bad
 int isBadRequest(struct ClientRequest * rObj);
 
+int healthCheckServers();
 //=====================================================================================
