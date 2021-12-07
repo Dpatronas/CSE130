@@ -342,6 +342,7 @@ int loadBalance() {
 
 // Querie all servers & Load balances the current server to use. 
 void healthCheckServers() {
+  struct timeval tv1;
 
   char healthRequest[HEADER_SIZE];
   char buff[HEADER_SIZE];
@@ -377,17 +378,21 @@ void healthCheckServers() {
 
     while(1)
     {
+      tv1.tv_usec = 200;
+      setsockopt(serverfd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv1, sizeof tv1);
+      
       int rdCount = read(serverfd, healthStatus, PROCESS_BODY_SIZE);
-      if (( pch = strstr(healthStatus,"\n")) != NULL) {
+
+      if (rdCount <= 0) {
         close(serverfd);
         break;
       }
       
-      if (rdCount <= 0) {
-        // printf("Exitting w/ condition rdCount= %d\n", rdCount);
+      if (( pch = strstr(healthStatus,"\n")) != NULL) {
         close(serverfd);
         break;
       }
+
       msgs++;
     }
 
