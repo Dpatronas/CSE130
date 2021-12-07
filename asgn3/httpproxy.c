@@ -56,7 +56,6 @@ static uint32_t cached_files = 0;       // running total
 // Determines which index of cache to override for storing.FIFO
 #define CACHEINDX ((cached_files) % (cache_capacity))
 
-
 // Returns 1 for 400 code
 int isBadRequest(struct ClientRequest * rObj) {
 
@@ -223,7 +222,8 @@ void internalServerError(struct ClientRequest rObj) {
 }
 
 
-void forwardResponse(int sourcefd, int destfd, char * resourcename) {
+void forwardResponse(int sourcefd, int destfd, char * resourcename, int server) {
+
   int serv_status = 0;
   uint32_t content_len = 0;
   char resourceName[PROCESS_BODY_SIZE];
@@ -231,7 +231,7 @@ void forwardResponse(int sourcefd, int destfd, char * resourcename) {
   struct timeval tv2;
   int rd_indx = 0;
   int cached = 0;
-  
+
   char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
   if(!readbuff) { fprintf(stderr, "Bad malloc!"); return; }
 
@@ -254,9 +254,9 @@ void forwardResponse(int sourcefd, int destfd, char * resourcename) {
       char * tmp  = strstr(readbuff, "Last-Modified:");
 
       if (serv_status != 200) {
-        server_errors[currChosenServer]++;
+        server_errors[server]++;
       }
-      server_entries[currChosenServer]++;
+      server_entries[server]++;
       
       if ((cache_enabled) && (serv_status == 200) && (content_len <= max_cache_size)) {
         cached = 1;
@@ -286,10 +286,10 @@ void forwardResponse(int sourcefd, int destfd, char * resourcename) {
 
   if (cached) {
     cache_directory[CACHEINDX]->file_size = rd_indx;
-    // printf("Cache_directory[%d]\nNAME = %s\nSIZE = %d\nMODIFIED = %s\n", 
-      // CACHEINDX, cache_directory[CACHEINDX]->file_name, cache_directory[CACHEINDX]->file_size, cache_directory[CACHEINDX]->age_in_cache);
-
     // Done storing the cache object
+    printf("\nCache_directory[%d]\nNAME = %s\nSIZE = %d\nMODIFIED = %s\n", 
+      CACHEINDX, cache_directory[CACHEINDX]->file_name, cache_directory[CACHEINDX]->file_size, cache_directory[CACHEINDX]->age_in_cache);
+    
     cached_files++; // Increment for FIFO
   }
 
@@ -298,12 +298,12 @@ void forwardResponse(int sourcefd, int destfd, char * resourcename) {
 }
 
 
-void relayRequesttoServer(char* header, char *resourcename, size_t len, int dst_fd, int src_fd) {
+void relayRequesttoServer(char* header, char *resourcename, size_t len, int dst_fd, int src_fd, int server) {
   // send header req.
   int sent = send(dst_fd, header, len, 0);
   if (sent > 0)
   {
-    forwardResponse(dst_fd, src_fd, resourcename);
+    forwardResponse(dst_fd, src_fd, resourcename, server);
   }
 }
 
@@ -341,8 +341,7 @@ int loadBalance() {
 
 
 // Querie all servers & Load balances the current server to use. 
-// Returns chosen server index or -1 (all offline)
-int healthCheckServers() {
+void healthCheckServers() {
 
   char healthRequest[HEADER_SIZE];
   char buff[HEADER_SIZE];
@@ -380,6 +379,7 @@ int healthCheckServers() {
     {
       int rdCount = read(serverfd, healthStatus, PROCESS_BODY_SIZE);
       if (( pch = strstr(healthStatus,"\n")) != NULL) {
+        close(serverfd);
         break;
       }
       
@@ -417,31 +417,27 @@ int healthCheckServers() {
     // printf("[!healthck] %d <%u><%u>\n", server_pool[i], server_errors[i], server_entries[i]);
     close(serverfd);
   }
-
-  // balance based on new logs
-  return loadBalance();
 }
 
 
-// return the diff of times
-int headReq(char * proxymod, char * resourcename) {
+// return the diff of times from "last modified" for proxy file and server file
+int headReq(char * proxyMod, char * resourcename, int server) {
+  int ret = -1;
+
   struct tm tm1 = {0};
   struct tm tm2 = {0};
 
-  strptime(proxymod, "%a, %d %b %Y %H:%M:%S", &tm1);
-
   char headRequest[HEADER_SIZE];
-  sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resourcename, server_pool[currChosenServer]);
+  sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resourcename, server_pool[server]);
 
-  int serverfd = create_client_socket(server_pool[currChosenServer]);
+  int serverfd = create_client_socket(server_pool[server]);
   if (serverfd < 0) { 
-    server_status[currChosenServer] = 0;
+    server_status[server] = 0;
     return -1;
   }
 
-  char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
-  char* servMOD = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
-
+  char* readbuff = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char)); //read response from server HEAD
+  char* servMod  = (char *)calloc(PROCESS_BODY_SIZE, sizeof(char));
 
   int s = send(serverfd, headRequest, strlen(headRequest), 0);
   if (s < 0) { return -1;}
@@ -451,9 +447,10 @@ int headReq(char * proxymod, char * resourcename) {
   close(serverfd);
 
   char * tmp  = strstr(readbuff, "Last-Modified:");
-  memcpy(servMOD, tmp, 40 * sizeof(char));
+  memcpy(servMod, tmp, 40 * sizeof(char));
 
-  strptime(proxymod, "%a, %d %b %Y %H:%M:%S", &tm1);
+  strptime(proxyMod, "Last-Modified: %a, %d %b %Y %H:%M:%S", &tm1);
+  strptime(servMod,  "Last-Modified: %a, %d %b %Y %H:%M:%S", &tm2);
 
   tm1.tm_isdst= -1;
   tm2.tm_isdst= -1;
@@ -461,8 +458,15 @@ int headReq(char * proxymod, char * resourcename) {
   time_t t1 = mktime(&tm1);
   time_t t2 = mktime(&tm2);
 
+  double diff = difftime(t2, t1);
   // printf("Same or na? %f\n", difftime(t1,t2));
-  return difftime(t1,t2);
+
+  free(readbuff);
+  free(servMod);
+  readbuff = servMod = NULL;
+
+  ret = (diff > 0) ? 1 : 0;
+  return ret;
 
 }
 
@@ -479,7 +483,8 @@ void ProcessClientRequest(char *c_request, int connfd) {
 
   // HC
   if (responses % healthFrequency == 0) {
-    currChosenServer = healthCheckServers(); 
+    healthCheckServers();
+    currChosenServer = loadBalance();
   }
   // between HC
   else {
@@ -503,7 +508,7 @@ void ProcessClientRequest(char *c_request, int connfd) {
   }
   // printf("Chosen Server = %d\n\n", server_pool[currChosenServer]);
   responses++;
-
+  int server = currChosenServer;
   pthread_mutex_unlock(&mtx);
 
   int parse_status = ParseHeader(c_request, &rObj);
@@ -514,9 +519,8 @@ void ProcessClientRequest(char *c_request, int connfd) {
   }
 
   // All down / unresponsive
-  else if (currChosenServer < 0) {
-    rObj.status_code = 500;
-    ProxyResponse(rObj);
+  else if (server < 0) {
+      internalServerError(rObj);
     return;
   }
 
@@ -528,23 +532,22 @@ void ProcessClientRequest(char *c_request, int connfd) {
         int len = strlen(rObj.resource);
         if (strncmp(rObj.resource, cache_directory[i]->file_name, len) == 0 ) {
           // ALSO Check modified dates
-          if (headReq(cache_directory[i]->age_in_cache, rObj.resource) == 0) {
-            // printf("\n[CACHE HIT!] %s\n", rObj.resource);
+          if (headReq(cache_directory[i]->age_in_cache, rObj.resource, server) == 0) {
+            printf("\n[CACHE HIT!] %s\n", rObj.resource);
             int w = write(rObj.client_socket, cache_directory[i]->file_contents, cache_directory[i]->file_size);
             if (w < 0) {
-              rObj.status_code = 500;
-              ProxyResponse(rObj);
+              internalServerError(rObj);
             }
             return;
           }
+          //otherwise continue to cache an updated file... should we override the old files indexs? 
+          // Multiple copy problem if not...
         }
       }
     }
-    // else {
-      serverfd = create_client_socket(server_pool[currChosenServer]);
-      relayRequesttoServer(rObj.c_request, rObj.resource, strlen(rObj.c_request), serverfd, connfd);
-      close(serverfd);
-    // }
+    serverfd = create_client_socket(server_pool[server]);
+    relayRequesttoServer(rObj.c_request, rObj.resource, strlen(rObj.c_request), serverfd, connfd, server);
+    close(serverfd);
   }
   else {
     rObj.status_code = 501;
@@ -553,7 +556,6 @@ void ProcessClientRequest(char *c_request, int connfd) {
   }
 
 }
-
 
 
 // Receive client requests
