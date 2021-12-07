@@ -431,7 +431,7 @@ int headReq(char * proxyMod, char * resourcename) {
   struct tm tm2 = {0};
 
   char headRequest[HEADER_SIZE];
-  sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resourcename, server_pool[server]);
+  sprintf(headRequest, "HEAD /%s HTTP/1.1\r\nHost: localhost:%d\r\n\r\n", resourcename, server_pool[currChosenServer]);
 
   int serverfd = create_client_socket(server_pool[currChosenServer]);
   if (serverfd < 0) { 
